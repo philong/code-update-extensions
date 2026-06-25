@@ -202,6 +202,8 @@ def check_updates(installed_exts, target_platform, exclude_prerelease=True):
                 if parse_version(latest_version) > parse_version(installed_ver):
                     updates.append({
                         "id": full_id,
+                        "publisher": pub_name,
+                        "name": ext_name,
                         "installed": installed_ver,
                         "latest": latest_version,
                         "platform": latest_ver_obj.get("targetPlatform") or "universal"
@@ -211,9 +213,56 @@ def check_updates(installed_exts, target_platform, exclude_prerelease=True):
                 
     return updates
 
+def download_updates(updates, download_dir):
+    os.makedirs(download_dir, exist_ok=True)
+    for update in updates:
+        pub_name = update["publisher"]
+        ext_name = update["name"]
+        version = update["latest"]
+        platform = update["platform"]
+        
+        url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{pub_name}/vsextensions/{ext_name}/{version}/vspackage"
+        if platform and platform != "universal":
+            url += f"?targetPlatform={platform}"
+            
+        filename = f"{pub_name}.{ext_name}-{version}"
+        if platform and platform != "universal":
+            filename += f"-{platform}"
+        filename += ".vsix"
+        
+        filepath = os.path.join(download_dir, filename)
+        
+        print(f"Downloading {Colors.CYAN}{update['id']}{Colors.ENDC} v{Colors.GREEN}{version}{Colors.ENDC} ({platform})...")
+        
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+        )
+        
+        try:
+            with urllib.request.urlopen(req) as response:
+                content_encoding = response.headers.get("Content-Encoding", "").lower()
+                body = response.read()
+                
+                if content_encoding == "gzip":
+                    import gzip
+                    body = gzip.decompress(body)
+                elif content_encoding == "deflate":
+                    import zlib
+                    body = zlib.decompress(body)
+                    
+                with open(filepath, "wb") as f:
+                    f.write(body)
+            print(f"  {Colors.GREEN}✓{Colors.ENDC} Saved to {filepath}")
+        except Exception as e:
+            print(f"  {Colors.RED}✗ Failed to download: {e}{Colors.ENDC}", file=sys.stderr)
+
 def main():
     parser = argparse.ArgumentParser(description="Check for VS Code extension updates.")
     parser.add_argument("--include-prerelease", action="store_true", help="Include pre-release versions in update check")
+    parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory (defaults to current directory if specified without a path)")
     args = parser.parse_args()
 
     enable_colors()
@@ -244,6 +293,11 @@ def main():
                   f"{update['platform']:<15}")
     else:
         print(f"{Colors.GREEN}All extensions are up to date!{Colors.ENDC}")
+
+    if updates and args.download_dir is not None:
+        print()
+        print(f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{args.download_dir}{Colors.ENDC}")
+        download_updates(updates, args.download_dir)
 
 if __name__ == "__main__":
     main()
