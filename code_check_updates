@@ -88,17 +88,17 @@ def parse_version(v_str):
             
     return (tuple(comparable_main), is_release, tuple(comparable_pre))
 
-def get_installed_extensions():
+def get_installed_extensions(code_binary="code"):
     try:
         result = subprocess.run(
-            ["code", "--list-extensions", "--show-versions"],
+            [code_binary, "--list-extensions", "--show-versions"],
             capture_output=True,
             text=True,
             check=True
         )
         output = result.stdout
     except Exception as e:
-        print(f"{Colors.RED}Error running 'code --list-extensions --show-versions': {e}{Colors.ENDC}", file=sys.stderr)
+        print(f"{Colors.RED}Error running '{code_binary} --list-extensions --show-versions': {e}{Colors.ENDC}", file=sys.stderr)
         sys.exit(1)
         
     extensions = {}
@@ -118,10 +118,10 @@ def is_prerelease(version_obj):
             return True
     return False
 
-def get_vscode_version():
+def get_vscode_version(code_binary="code"):
     try:
         result = subprocess.run(
-            ["code", "--version"],
+            [code_binary, "--version"],
             capture_output=True,
             text=True,
             check=True
@@ -348,15 +348,18 @@ def main():
     parser = argparse.ArgumentParser(description="Check for VS Code extension updates.")
     parser.add_argument("--include-prerelease", action="store_true", help="Include pre-release versions in update check")
     parser.add_argument("--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
+    parser.add_argument("--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
     parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory (defaults to current directory if specified without a path)")
     args = parser.parse_args()
 
     enable_colors()
     
+    code_binary = os.path.expanduser(args.code_binary)
+
     # Determine VS Code version to use for compatibility checks
     vscode_version = None
     if not args.no_code_version_check:
-        vscode_version = get_vscode_version()
+        vscode_version = get_vscode_version(code_binary)
         
     target_platform = get_local_target_platform()
     
@@ -370,7 +373,7 @@ def main():
         
     print(f"{Colors.BLUE}Fetching installed VS Code extensions...{Colors.ENDC}")
     
-    installed_exts = get_installed_extensions()
+    installed_exts = get_installed_extensions(code_binary)
     if not installed_exts:
         print("No extensions found.")
         return
