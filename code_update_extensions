@@ -546,7 +546,9 @@ def select_updates(updates):
                         checkbox = "[x]" if selected[i] else "[ ]"
                     eligible_str = f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
                 else:
-                    checkbox = "[ ]"
+                    checkbox = f"[{Colors.YELLOW}!{Colors.ENDC}]" if selected[i] else "[ ]"
+                    if not Colors.YELLOW:
+                        checkbox = "[!]" if selected[i] else "[ ]"
                     eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
                 
                 line = (f"{prefix} {checkbox} {Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
@@ -571,15 +573,12 @@ def select_updates(updates):
             elif key == 'down':
                 cursor_idx = (cursor_idx + 1) % n
             elif key == 'space':
-                if updates[cursor_idx]["eligible"]:
-                    selected[cursor_idx] = not selected[cursor_idx]
+                selected[cursor_idx] = not selected[cursor_idx]
             elif key in ('a', 'A'):
-                # Check if all eligible are selected
-                all_eligible_selected = all(selected[i] for i, u in enumerate(updates) if u["eligible"])
-                if all_eligible_selected:
+                if all(selected):
                     selected = [False] * n
                 else:
-                    selected = [bool(u["eligible"]) for u in updates]
+                    selected = [True] * n
             elif key == 'enter':
                 break
 
@@ -591,7 +590,15 @@ def select_updates(updates):
         sys.stdout.write('\033[?25h\n')
         sys.stdout.flush()
 
-        chosen = [updates[i] for i in range(n) if selected[i]]
+        chosen = []
+        for i in range(n):
+            if selected[i]:
+                update = updates[i]
+                if not update["eligible"]:
+                    # User explicitly chose to install the held back latest version
+                    update["eligible"] = update["latest"]
+                    update["eligible_platform"] = update["latest_platform"]
+                chosen.append(update)
         return chosen
 
     except Exception as e:
