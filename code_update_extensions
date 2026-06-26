@@ -575,10 +575,18 @@ def select_updates(updates):
             elif key == 'space':
                 selected[cursor_idx] = not selected[cursor_idx]
             elif key in ('a', 'A'):
-                if all(selected):
-                    selected = [False] * n
+                # Check if all eligible updates are currently selected
+                all_eligible_selected = all(selected[i] for i, u in enumerate(updates) if u["eligible"])
+                if all_eligible_selected:
+                    # Uncheck only eligible updates, leaving held-back ones alone
+                    for i, u in enumerate(updates):
+                        if u["eligible"]:
+                            selected[i] = False
                 else:
-                    selected = [True] * n
+                    # Check only eligible updates, leaving held-back ones alone
+                    for i, u in enumerate(updates):
+                        if u["eligible"]:
+                            selected[i] = True
             elif key == 'enter':
                 break
 
