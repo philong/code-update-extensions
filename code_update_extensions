@@ -340,7 +340,45 @@ def download_updates(updates, download_dir):
         try:
             with urllib.request.urlopen(req) as response:
                 content_encoding = response.headers.get("Content-Encoding", "").lower()
-                body = response.read()
+                total_size = response.headers.get("Content-Length")
+                if total_size:
+                    try:
+                        total_size = int(total_size)
+                    except ValueError:
+                        total_size = None
+                
+                chunks = []
+                bytes_read = 0
+                chunk_size = 32768  # 32 KB chunks
+                
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    bytes_read += len(chunk)
+                    
+                    if total_size and total_size > 0:
+                        percent = (bytes_read * 100) // total_size
+                        bar_len = 30
+                        filled_len = int(round(bar_len * bytes_read / float(total_size)))
+                        bar = '=' * filled_len + ' ' * (bar_len - filled_len)
+                        
+                        read_mb = bytes_read / (1024 * 1024)
+                        total_mb = total_size / (1024 * 1024)
+                        
+                        sys.stdout.write(f"\r  [{bar}] {percent}% ({read_mb:.2f}MB / {total_mb:.2f}MB)")
+                        sys.stdout.flush()
+                    else:
+                        read_mb = bytes_read / (1024 * 1024)
+                        sys.stdout.write(f"\r  Downloaded: {read_mb:.2f}MB")
+                        sys.stdout.flush()
+                        
+                if total_size or bytes_read > 0:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    
+                body = b"".join(chunks)
                 
                 if content_encoding == "gzip":
                     import gzip
