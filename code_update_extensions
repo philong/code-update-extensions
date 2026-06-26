@@ -5,11 +5,13 @@ import subprocess
 import re
 import json
 import urllib.request
+import urllib.error
 import platform
 import argparse
 import tempfile
 import shutil
 import datetime
+import time
 
 try:
     import tty
@@ -266,11 +268,39 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
             method="POST"
         )
         
-        try:
-            with urllib.request.urlopen(req, timeout=30) as response:
-                resp_data = json.loads(response.read().decode("utf-8"))
-        except Exception as e:
-            print(f"{Colors.RED}Failed to query marketplace API: {e}{Colors.ENDC}", file=sys.stderr)
+        resp_data = None
+        max_retries = 3
+        backoff = 2.0
+        for attempt in range(max_retries + 1):
+            # retry_reason is set to a short description only for transient failures.
+            retry_reason = None
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    resp_data = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                err = e
+                if 500 <= e.code < 600:
+                    retry_reason = f"returned HTTP status {e.code}"
+            except (urllib.error.URLError, TimeoutError) as e:
+                # Read timeouts surface as a bare TimeoutError; connect timeouts come
+                # wrapped in URLError with a "timed out" reason.
+                err = e
+                reason = str(getattr(e, "reason", e)).lower()
+                if isinstance(e, TimeoutError) or "timed out" in reason or "timeout" in reason:
+                    retry_reason = "request timed out"
+            except Exception as e:
+                err = e
+
+            if retry_reason and attempt < max_retries:
+                print(f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {backoff}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}", file=sys.stderr)
+                time.sleep(backoff)
+                backoff *= 2.0
+            else:
+                print(f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}", file=sys.stderr)
+                break
+
+        if resp_data is None:
             continue
             
         results = resp_data.get("results", [])
