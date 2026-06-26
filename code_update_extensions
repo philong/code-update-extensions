@@ -632,27 +632,6 @@ def install_updates(updates, download_dir, code_binary="code"):
             print(f"  {Colors.RED}✗ Installation failed: {e.stderr.strip() or e}{Colors.ENDC}", file=sys.stderr)
         except Exception as e:
             print(f"  {Colors.RED}✗ Installation failed: {e}{Colors.ENDC}", file=sys.stderr)
-
-def cleanup_temp_files(updates, download_dir):
-    print(f"\n{Colors.BLUE}Cleaning up temporary files...{Colors.ENDC}")
-    for update in updates:
-        pub_name = update["publisher"]
-        ext_name = update["name"]
-        version = update["latest"]
-        platform = update["platform"]
-        
-        filename = f"{pub_name}.{ext_name}-{version}"
-        if platform and platform != "universal":
-            filename += f"-{platform}"
-        filename += ".vsix"
-        
-        filepath = os.path.join(download_dir, filename)
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception as e:
-                print(f"  {Colors.YELLOW}Warning: Could not remove temporary file {filepath}: {e}{Colors.ENDC}", file=sys.stderr)
-
 def main():
     parser = argparse.ArgumentParser(description="Check, download, and install VS Code extension updates.")
     parser.add_argument("-p", "--include-prerelease", action="store_true", help="Include pre-release versions in update check")
