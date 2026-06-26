@@ -246,7 +246,7 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
         )
         
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 resp_data = json.loads(response.read().decode("utf-8"))
         except Exception as e:
             print(f"{Colors.RED}Failed to query marketplace API: {e}{Colors.ENDC}", file=sys.stderr)
@@ -338,7 +338,7 @@ def download_updates(updates, download_dir):
         )
         
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:
                 content_encoding = response.headers.get("Content-Encoding", "").lower()
                 total_size = response.headers.get("Content-Length")
                 if total_size:
