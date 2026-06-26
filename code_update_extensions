@@ -234,6 +234,10 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
     batch_size = 50
     updates = []
     
+    if sys.stdout.isatty():
+        sys.stdout.write(f"\rChecking updates: [{' ' * 20}] 0% (0/{len(ext_ids)})")
+        sys.stdout.flush()
+
     # Query in batches
     for i in range(0, len(ext_ids), batch_size):
         batch = ext_ids[i:i+batch_size]
@@ -272,14 +276,12 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
         max_retries = 3
         backoff = 2.0
         for attempt in range(max_retries + 1):
-            if sys.stdout.isatty():
-                current_count = min(i + batch_size, len(ext_ids))
-                percent = (current_count * 100) // len(ext_ids)
+            if attempt > 0 and sys.stdout.isatty():
+                percent = (i * 100) // len(ext_ids)
                 bar_len = 20
-                filled_len = int(round(bar_len * current_count / float(len(ext_ids))))
+                filled_len = int(round(bar_len * i / float(len(ext_ids))))
                 bar = '=' * filled_len + ' ' * (bar_len - filled_len)
-                suffix = f" (retry {attempt})" if attempt > 0 else ""
-                sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({current_count}/{len(ext_ids)}){suffix}")
+                sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({i}/{len(ext_ids)}) (retry {attempt})")
                 sys.stdout.flush()
 
             # retry_reason is set to a short description only for transient failures.
@@ -315,6 +317,15 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                     sys.stdout.flush()
                 print(f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}", file=sys.stderr)
                 break
+
+        if sys.stdout.isatty():
+            current_count = min(i + batch_size, len(ext_ids))
+            percent = (current_count * 100) // len(ext_ids)
+            bar_len = 20
+            filled_len = int(round(bar_len * current_count / float(len(ext_ids))))
+            bar = '=' * filled_len + ' ' * (bar_len - filled_len)
+            sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({current_count}/{len(ext_ids)})")
+            sys.stdout.flush()
 
         if resp_data is None:
             continue
