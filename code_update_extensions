@@ -293,20 +293,6 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 # Exclude pre-releases if requested
                 if exclude_prerelease and is_prerelease(ver_obj):
                     continue
-                # Exclude based on release age if min_release_age is set
-                if min_release_age and min_release_age > datetime.timedelta(0):
-                    last_updated = ver_obj.get("lastUpdated")
-                    if last_updated:
-                        try:
-                            cleaned_ts = last_updated
-                            if cleaned_ts.endswith('Z'):
-                                cleaned_ts = cleaned_ts[:-1] + '+00:00'
-                            release_dt = datetime.datetime.fromisoformat(cleaned_ts)
-                            now = datetime.datetime.now(datetime.timezone.utc)
-                            if now - release_dt < min_release_age:
-                                continue
-                        except Exception:
-                            pass
                 # Exclude incompatible VS Code versions if vscode_version is set
                 if vscode_version:
                     engine_constraint = get_engine_constraint(ver_obj)
@@ -326,18 +312,53 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 latest_ver_obj = compatible_versions[0]
                 latest_version = latest_ver_obj["version"]
                 
-                # Check if it's newer
+                # Check if it's newer than installed
                 if parse_version(latest_version) > parse_version(installed_ver):
+                    # Find the latest eligible version
+                    eligible_ver_obj = None
+                    for ver_obj in compatible_versions:
+                        if min_release_age and min_release_age > datetime.timedelta(0):
+                            last_updated = ver_obj.get("lastUpdated")
+                            if last_updated:
+                                try:
+                                    cleaned_ts = last_updated
+                                    if cleaned_ts.endswith('Z'):
+                                        cleaned_ts = cleaned_ts[:-1] + '+00:00'
+                                    release_dt = datetime.datetime.fromisoformat(cleaned_ts)
+                                    now = datetime.datetime.now(datetime.timezone.utc)
+                                    if now - release_dt < min_release_age:
+                                        continue
+                                except Exception:
+                                    pass
+                        eligible_ver_obj = ver_obj
+                        break
+                        
                     last_updated = latest_ver_obj.get("lastUpdated", "")
-                    release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
+                    latest_release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
+                    
+                    eligible_version = None
+                    eligible_release_date = ""
+                    eligible_platform = "universal"
+                    
+                    if eligible_ver_obj:
+                        el_ver = eligible_ver_obj["version"]
+                        if parse_version(el_ver) > parse_version(installed_ver):
+                            eligible_version = el_ver
+                            el_updated = eligible_ver_obj.get("lastUpdated", "")
+                            eligible_release_date = el_updated[:10] if len(el_updated) >= 10 else el_updated
+                            eligible_platform = eligible_ver_obj.get("targetPlatform") or "universal"
+                            
                     updates.append({
                         "id": full_id,
                         "publisher": pub_name,
                         "name": ext_name,
                         "installed": installed_ver,
                         "latest": latest_version,
-                        "release_date": release_date,
-                        "platform": latest_ver_obj.get("targetPlatform") or "universal"
+                        "latest_release_date": latest_release_date,
+                        "latest_platform": latest_ver_obj.get("targetPlatform") or "universal",
+                        "eligible": eligible_version,
+                        "eligible_release_date": eligible_release_date,
+                        "eligible_platform": eligible_platform
                     })
             except Exception as ex:
                 print(f"{Colors.RED}Warning: Error parsing versions for {full_id}: {ex}{Colors.ENDC}", file=sys.stderr)
@@ -347,10 +368,12 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
 def download_updates(updates, download_dir):
     os.makedirs(download_dir, exist_ok=True)
     for update in updates:
+        if not update["eligible"]:
+            continue
         pub_name = update["publisher"]
         ext_name = update["name"]
-        version = update["latest"]
-        platform = update["platform"]
+        version = update["eligible"]
+        platform = update["eligible_platform"]
         
         url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{pub_name}/vsextensions/{ext_name}/{version}/vspackage"
         if platform and platform != "universal":
@@ -468,6 +491,28 @@ def get_key():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
+def cleanup_temp_files(updates, download_dir):
+    print(f"\n{Colors.BLUE}Cleaning up temporary files...{Colors.ENDC}")
+    for update in updates:
+        if not update["eligible"]:
+            continue
+        pub_name = update["publisher"]
+        ext_name = update["name"]
+        version = update["eligible"]
+        platform = update["eligible_platform"]
+        
+        filename = f"{pub_name}.{ext_name}-{version}"
+        if platform and platform != "universal":
+            filename += f"-{platform}"
+        filename += ".vsix"
+        
+        filepath = os.path.join(download_dir, filename)
+        if os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                print(f"  {Colors.YELLOW}Warning: Could not remove temporary file {filepath}: {e}{Colors.ENDC}", file=sys.stderr)
+
 def select_updates(updates):
     if not HAS_TTY or not sys.stdin.isatty() or not sys.stdout.isatty():
         return updates
@@ -478,27 +523,38 @@ def select_updates(updates):
 
     try:
         selected = [False] * len(updates)
+        # Pre-select those that have an eligible version
+        for i, update in enumerate(updates):
+            if update["eligible"]:
+                selected[i] = True
         cursor_idx = 0
         n = len(updates)
 
         # Print header
         print(f"{Colors.GREEN}{Colors.BOLD}Updates available (Space to toggle selection, 'a' to toggle select all, Enter to validate/install, Ctrl+C to cancel):{Colors.ENDC}")
-        header = f"    {'Extension ID':<50} {'Installed':<15} {'Latest':<15} {'Release Date':<15} {'Platform':<15}"
+        header = f"    {'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}"
         print(f"{Colors.BOLD}{header}{Colors.ENDC}")
         print("-" * 115)
 
         def draw_list():
             for i, update in enumerate(updates):
                 prefix = ">" if i == cursor_idx else " "
-                checkbox = f"[{Colors.GREEN}x{Colors.ENDC}]" if selected[i] else "[ ]"
-                if not Colors.GREEN:
-                    checkbox = "[x]" if selected[i] else "[ ]"
                 
-                line = (f"{prefix} {checkbox} {Colors.CYAN}{update['id']:<50}{Colors.ENDC} "
-                        f"{Colors.YELLOW}{update['installed']:<15}{Colors.ENDC} "
-                        f"{Colors.GREEN}{update['latest']:<15}{Colors.ENDC} "
-                        f"{update['release_date']:<15} "
-                        f"{update['platform']:<15}")
+                if update["eligible"]:
+                    checkbox = f"[{Colors.GREEN}x{Colors.ENDC}]" if selected[i] else "[ ]"
+                    if not Colors.GREEN:
+                        checkbox = "[x]" if selected[i] else "[ ]"
+                    eligible_str = f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
+                else:
+                    checkbox = "[ ]"
+                    eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
+                
+                line = (f"{prefix} {checkbox} {Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
+                        f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
+                        f"{eligible_str} "
+                        f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
+                        f"{update['eligible_release_date'] or update['latest_release_date']:<15} "
+                        f"{update['eligible_platform'] or update['latest_platform']:<12}")
                 print(f"\r\033[K{line}")
 
         draw_list()
@@ -515,12 +571,15 @@ def select_updates(updates):
             elif key == 'down':
                 cursor_idx = (cursor_idx + 1) % n
             elif key == 'space':
-                selected[cursor_idx] = not selected[cursor_idx]
+                if updates[cursor_idx]["eligible"]:
+                    selected[cursor_idx] = not selected[cursor_idx]
             elif key in ('a', 'A'):
-                if all(selected):
+                # Check if all eligible are selected
+                all_eligible_selected = all(selected[i] for i, u in enumerate(updates) if u["eligible"])
+                if all_eligible_selected:
                     selected = [False] * n
                 else:
-                    selected = [True] * n
+                    selected = [bool(u["eligible"]) for u in updates]
             elif key == 'enter':
                 break
 
@@ -542,10 +601,12 @@ def select_updates(updates):
 
 def install_updates(updates, download_dir, code_binary="code"):
     for update in updates:
+        if not update["eligible"]:
+            continue
         pub_name = update["publisher"]
         ext_name = update["name"]
-        version = update["latest"]
-        platform = update["platform"]
+        version = update["eligible"]
+        platform = update["eligible_platform"]
         
         filename = f"{pub_name}.{ext_name}-{version}"
         if platform and platform != "universal":
@@ -669,14 +730,20 @@ def main():
                 print("No updates selected for installation.")
         else:
             print(f"{Colors.GREEN}{Colors.BOLD}Updates available:{Colors.ENDC}")
-            print(f"{Colors.BOLD}{'Extension ID':<50} {'Installed':<15} {'Latest':<15} {'Release Date':<15} {'Platform':<15}{Colors.ENDC}")
-            print("-" * 110)
+            print(f"{Colors.BOLD}{'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}{Colors.ENDC}")
+            print("-" * 115)
             for update in updates:
-                print(f"{Colors.CYAN}{update['id']:<50}{Colors.ENDC} "
-                      f"{Colors.YELLOW}{update['installed']:<15}{Colors.ENDC} "
-                      f"{Colors.GREEN}{update['latest']:<15}{Colors.ENDC} "
-                      f"{update['release_date']:<15} "
-                      f"{update['platform']:<15}")
+                if update["eligible"]:
+                    eligible_str = f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
+                else:
+                    eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
+                
+                print(f"{Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
+                      f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
+                      f"{eligible_str} "
+                      f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
+                      f"{update['eligible_release_date'] or update['latest_release_date']:<15} "
+                      f"{update['eligible_platform'] or update['latest_platform']:<12}")
             
             if args.download_dir is not None:
                 print()
