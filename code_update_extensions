@@ -272,6 +272,16 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
         max_retries = 3
         backoff = 2.0
         for attempt in range(max_retries + 1):
+            if sys.stdout.isatty():
+                current_count = min(i + batch_size, len(ext_ids))
+                percent = (current_count * 100) // len(ext_ids)
+                bar_len = 20
+                filled_len = int(round(bar_len * current_count / float(len(ext_ids))))
+                bar = '=' * filled_len + ' ' * (bar_len - filled_len)
+                suffix = f" (retry {attempt})" if attempt > 0 else ""
+                sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({current_count}/{len(ext_ids)}){suffix}")
+                sys.stdout.flush()
+
             # retry_reason is set to a short description only for transient failures.
             retry_reason = None
             try:
@@ -293,10 +303,16 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 err = e
 
             if retry_reason and attempt < max_retries:
+                if sys.stdout.isatty():
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
                 print(f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {backoff}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}", file=sys.stderr)
                 time.sleep(backoff)
                 backoff *= 2.0
             else:
+                if sys.stdout.isatty():
+                    sys.stdout.write("\r\033[K")
+                    sys.stdout.flush()
                 print(f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}", file=sys.stderr)
                 break
 
