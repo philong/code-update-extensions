@@ -9,6 +9,7 @@ import platform
 import argparse
 import tempfile
 import shutil
+import datetime
 
 try:
     import tty
@@ -208,7 +209,25 @@ def get_engine_constraint(version_obj):
             return p.get("value")
     return None
 
-def check_updates(installed_exts, target_platform, vscode_version=None, exclude_prerelease=True):
+def parse_age_threshold(age_str):
+    age_str = age_str.lower().strip()
+    if age_str in ("0", "0h", "0d", "0m"):
+        return datetime.timedelta(0)
+        
+    match = re.match(r'^(\d+)([hdm])$', age_str)
+    if not match:
+        raise ValueError(f"Invalid age format: '{age_str}'. Expected format like '24h', '1d', '30m'.")
+    value, unit = match.groups()
+    value = int(value)
+    if unit == 'h':
+        return datetime.timedelta(hours=value)
+    elif unit == 'd':
+        return datetime.timedelta(days=value)
+    elif unit == 'm':
+        return datetime.timedelta(minutes=value)
+    return datetime.timedelta(0)
+
+def check_updates(installed_exts, target_platform, vscode_version=None, exclude_prerelease=True, min_release_age=None):
     ext_ids = list(installed_exts.keys())
     batch_size = 50
     updates = []
@@ -274,6 +293,20 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 # Exclude pre-releases if requested
                 if exclude_prerelease and is_prerelease(ver_obj):
                     continue
+                # Exclude based on release age if min_release_age is set
+                if min_release_age and min_release_age > datetime.timedelta(0):
+                    last_updated = ver_obj.get("lastUpdated")
+                    if last_updated:
+                        try:
+                            cleaned_ts = last_updated
+                            if cleaned_ts.endswith('Z'):
+                                cleaned_ts = cleaned_ts[:-1] + '+00:00'
+                            release_dt = datetime.datetime.fromisoformat(cleaned_ts)
+                            now = datetime.datetime.now(datetime.timezone.utc)
+                            if now - release_dt < min_release_age:
+                                continue
+                        except Exception:
+                            pass
                 # Exclude incompatible VS Code versions if vscode_version is set
                 if vscode_version:
                     engine_constraint = get_engine_constraint(ver_obj)
@@ -566,9 +599,16 @@ def main():
     parser.add_argument("-b", "--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
     parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory. In interactive mode, this defaults to the system temporary directory if not specified. If specified without a path, defaults to the current directory.")
     parser.add_argument("-y", "--yes", action="store_true", help="Automatically download and install all updates without prompting (useful for non-interactive environments)")
+    parser.add_argument("-a", "--min-release-age", default="24h", help="Minimum age of a release to be considered for update (e.g. 24h, 1d) to mitigate supply chain attacks (default: 24h)")
     args = parser.parse_args()
 
     enable_colors()
+    
+    try:
+        min_release_age = parse_age_threshold(args.min_release_age)
+    except ValueError as e:
+        print(f"{Colors.RED}Error: {e}{Colors.ENDC}", file=sys.stderr)
+        sys.exit(1)
     
     code_binary_path = os.path.expanduser(args.code_binary)
     code_binary = shutil.which(code_binary_path) or code_binary_path
@@ -581,6 +621,8 @@ def main():
     target_platform = get_local_target_platform()
     
     print(f"{Colors.BLUE}Local Target Platform:{Colors.ENDC} {Colors.BOLD}{target_platform}{Colors.ENDC}")
+    if min_release_age > datetime.timedelta(0):
+        print(f"{Colors.BLUE}Min Release Age:{Colors.ENDC} {Colors.BOLD}{args.min_release_age}{Colors.ENDC}")
     if args.no_code_version_check:
         print(f"{Colors.BLUE}VS Code Version Check:{Colors.ENDC} {Colors.BOLD}Disabled{Colors.ENDC}")
     elif vscode_version:
@@ -598,7 +640,7 @@ def main():
     print(f"Found {len(installed_exts)} extensions installed.")
     print(f"{Colors.BLUE}Checking updates on VS Code Marketplace (excluding pre-releases: {not args.include_prerelease})...{Colors.ENDC}")
     
-    updates = check_updates(installed_exts, target_platform, vscode_version=vscode_version, exclude_prerelease=not args.include_prerelease)
+    updates = check_updates(installed_exts, target_platform, vscode_version=vscode_version, exclude_prerelease=not args.include_prerelease, min_release_age=min_release_age)
     
     print()
     if updates:
