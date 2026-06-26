@@ -252,7 +252,7 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 }
             ],
             "assetTypes": [],
-            "flags": 65930
+            "flags": 411
         }
         
         req_data = json.dumps(payload).encode("utf-8")
