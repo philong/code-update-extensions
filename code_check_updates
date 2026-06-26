@@ -285,12 +285,15 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 
                 # Check if it's newer
                 if parse_version(latest_version) > parse_version(installed_ver):
+                    last_updated = latest_ver_obj.get("lastUpdated", "")
+                    release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
                     updates.append({
                         "id": full_id,
                         "publisher": pub_name,
                         "name": ext_name,
                         "installed": installed_ver,
                         "latest": latest_version,
+                        "release_date": release_date,
                         "platform": latest_ver_obj.get("targetPlatform") or "universal"
                     })
             except Exception as ex:
@@ -386,12 +389,13 @@ def main():
     print()
     if updates:
         print(f"{Colors.GREEN}{Colors.BOLD}Updates available:{Colors.ENDC}")
-        print(f"{Colors.BOLD}{'Extension ID':<50} {'Installed':<15} {'Latest':<15} {'Platform':<15}{Colors.ENDC}")
-        print("-" * 95)
+        print(f"{Colors.BOLD}{'Extension ID':<50} {'Installed':<15} {'Latest':<15} {'Release Date':<15} {'Platform':<15}{Colors.ENDC}")
+        print("-" * 110)
         for update in updates:
             print(f"{Colors.CYAN}{update['id']:<50}{Colors.ENDC} "
                   f"{Colors.YELLOW}{update['installed']:<15}{Colors.ENDC} "
                   f"{Colors.GREEN}{update['latest']:<15}{Colors.ENDC} "
+                  f"{update['release_date']:<15} "
                   f"{update['platform']:<15}")
     else:
         print(f"{Colors.GREEN}All extensions are up to date!{Colors.ENDC}")
