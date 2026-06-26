@@ -543,6 +543,7 @@ def main():
     parser.add_argument("-n", "--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
     parser.add_argument("-b", "--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
     parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory. In interactive mode, this defaults to /tmp if not specified. If specified without a path, defaults to the current directory.")
+    parser.add_argument("-y", "--yes", action="store_true", help="Automatically download and install all updates without prompting (useful for non-interactive environments)")
     args = parser.parse_args()
 
     enable_colors()
@@ -578,7 +579,14 @@ def main():
     
     print()
     if updates:
-        if HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty():
+        if args.yes:
+            download_dir = args.download_dir if args.download_dir is not None else "/tmp"
+            print(f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir}{Colors.ENDC}")
+            download_updates(updates, download_dir)
+            print()
+            print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
+            install_updates(updates, download_dir, code_binary=code_binary)
+        elif HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty():
             selected_updates = select_updates(updates)
             if selected_updates:
                 print()
