@@ -346,9 +346,9 @@ def download_updates(updates, download_dir):
 
 def main():
     parser = argparse.ArgumentParser(description="Check for VS Code extension updates.")
-    parser.add_argument("--include-prerelease", action="store_true", help="Include pre-release versions in update check")
-    parser.add_argument("--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
-    parser.add_argument("--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
+    parser.add_argument("-p", "--include-prerelease", action="store_true", help="Include pre-release versions in update check")
+    parser.add_argument("-n", "--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
+    parser.add_argument("-b", "--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
     parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory (defaults to current directory if specified without a path)")
     args = parser.parse_args()
 
