@@ -365,6 +365,17 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
                 
     return updates
 
+def vsix_filename(update):
+    """Build the on-disk VSIX filename for an update (shared by download/install/cleanup)."""
+    pub_name = update["publisher"]
+    ext_name = update["name"]
+    version = update["eligible"]
+    platform = update["eligible_platform"]
+    filename = f"{pub_name}.{ext_name}-{version}"
+    if platform and platform != "universal":
+        filename += f"-{platform}"
+    return filename + ".vsix"
+
 def download_updates(updates, download_dir):
     os.makedirs(download_dir, exist_ok=True)
     for update in updates:
@@ -374,17 +385,12 @@ def download_updates(updates, download_dir):
         ext_name = update["name"]
         version = update["eligible"]
         platform = update["eligible_platform"]
-        
+
         url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{pub_name}/vsextensions/{ext_name}/{version}/vspackage"
         if platform and platform != "universal":
             url += f"?targetPlatform={platform}"
-            
-        filename = f"{pub_name}.{ext_name}-{version}"
-        if platform and platform != "universal":
-            filename += f"-{platform}"
-        filename += ".vsix"
-        
-        filepath = os.path.join(download_dir, filename)
+
+        filepath = os.path.join(download_dir, vsix_filename(update))
         
         print(f"Downloading {Colors.CYAN}{update['id']}{Colors.ENDC} v{Colors.GREEN}{version}{Colors.ENDC} ({platform})...")
         
@@ -496,78 +502,93 @@ def cleanup_temp_files(updates, download_dir):
     for update in updates:
         if not update["eligible"]:
             continue
-        pub_name = update["publisher"]
-        ext_name = update["name"]
-        version = update["eligible"]
-        platform = update["eligible_platform"]
-        
-        filename = f"{pub_name}.{ext_name}-{version}"
-        if platform and platform != "universal":
-            filename += f"-{platform}"
-        filename += ".vsix"
-        
-        filepath = os.path.join(download_dir, filename)
+        filepath = os.path.join(download_dir, vsix_filename(update))
         if os.path.exists(filepath):
             try:
                 os.remove(filepath)
             except Exception as e:
                 print(f"  {Colors.YELLOW}Warning: Could not remove temporary file {filepath}: {e}{Colors.ENDC}", file=sys.stderr)
 
+def truncate(text, width):
+    text = str(text)
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return text[:1]
+    return text[:width - 1] + "…"
+
 def select_updates(updates):
     if not HAS_TTY or not sys.stdin.isatty() or not sys.stdout.isatty():
         return updates
 
-    # Hide cursor
-    sys.stdout.write('\033[?25l')
+    n = len(updates)
+    selected = [bool(u["eligible"]) for u in updates]  # pre-select eligible updates
+    cursor_idx = 0
+    top = 0  # index of first visible row (scroll window)
+
+    # Fixed column widths; the Extension ID column flexes to the terminal width.
+    W_VER, W_DATE, W_PLAT = 12, 12, 12
+    # Per-row width excluding the id column: "P C[xxx] <id> v v v d p" with single-space gaps.
+    OVERHEAD = 6 + 1 + (W_VER + 1) * 3 + (W_DATE + 1) + W_PLAT
+
+    # Render into the alternate screen buffer and fully repaint each frame, so wrapped
+    # lines or lists taller than the terminal can never corrupt the display.
+    sys.stdout.write('\033[?1049h\033[?25l')
     sys.stdout.flush()
 
     try:
-        selected = [False] * len(updates)
-        # Pre-select those that have an eligible version
-        for i, update in enumerate(updates):
-            if update["eligible"]:
-                selected[i] = True
-        cursor_idx = 0
-        n = len(updates)
-
-        # Print header
-        print(f"{Colors.GREEN}{Colors.BOLD}Updates available (Space to toggle selection, 'a' to toggle select all, Enter to validate/install, Ctrl+C to cancel):{Colors.ENDC}")
-        header = f"    {'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}"
-        print(f"{Colors.BOLD}{header}{Colors.ENDC}")
-        print("-" * 115)
-
-        def draw_list():
-            for i, update in enumerate(updates):
-                prefix = ">" if i == cursor_idx else " "
-                
-                if update["eligible"]:
-                    checkbox = f"[{Colors.GREEN}x{Colors.ENDC}]" if selected[i] else "[ ]"
-                    if not Colors.GREEN:
-                        checkbox = "[x]" if selected[i] else "[ ]"
-                    eligible_str = f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
-                else:
-                    checkbox = f"[{Colors.YELLOW}!{Colors.ENDC}]" if selected[i] else "[ ]"
-                    if not Colors.YELLOW:
-                        checkbox = "[!]" if selected[i] else "[ ]"
-                    eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
-                
-                line = (f"{prefix} {checkbox} {Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
-                        f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
-                        f"{eligible_str} "
-                        f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
-                        f"{update['latest_release_date']:<15} "
-                        f"{update['eligible_platform'] or update['latest_platform']:<12}")
-                print(f"\r\033[K{line}")
-
-        draw_list()
-
         while True:
+            cols, rows = shutil.get_terminal_size((80, 24))
+            id_w = max(12, cols - OVERHEAD)
+            row_width = OVERHEAD + id_w
+            lines_per_row = max(1, -(-row_width // cols))  # ceil, accounts for wrapping
+            # Reserve rows for instructions + column header + separator + status.
+            win = max(1, min(n, (rows - 5) // lines_per_row))
+
+            # Keep cursor inside the scroll window.
+            if cursor_idx < top:
+                top = cursor_idx
+            elif cursor_idx >= top + win:
+                top = cursor_idx - win + 1
+            top = max(0, min(top, max(0, n - win)))
+
+            out = ['\033[H\033[2J']
+            out.append(f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Ctrl+C=cancel{Colors.ENDC}")
+            out.append(f"{Colors.BOLD}{'':6}{'Extension ID':<{id_w}} {'Installed':<{W_VER}} "
+                       f"{'Eligible':<{W_VER}} {'Latest':<{W_VER}} {'Release':<{W_DATE}} {'Platform':<{W_PLAT}}{Colors.ENDC}")
+            out.append("-" * min(cols, row_width))
+
+            for i in range(top, top + win):
+                update = updates[i]
+                prefix = ">" if i == cursor_idx else " "
+                if update["eligible"]:
+                    mark = f"{Colors.GREEN}x{Colors.ENDC}" if selected[i] else " "
+                    eligible_str = f"{Colors.GREEN}{truncate(update['eligible'], W_VER):<{W_VER}}{Colors.ENDC}"
+                else:
+                    mark = f"{Colors.YELLOW}!{Colors.ENDC}" if selected[i] else " "
+                    eligible_str = f"{Colors.YELLOW}{'held back':<{W_VER}}{Colors.ENDC}"
+                out.append(
+                    f"{prefix} [{mark}] {Colors.CYAN}{truncate(update['id'], id_w):<{id_w}}{Colors.ENDC} "
+                    f"{Colors.YELLOW}{truncate(update['installed'], W_VER):<{W_VER}}{Colors.ENDC} "
+                    f"{eligible_str} "
+                    f"{Colors.BLUE}{truncate(update['latest'], W_VER):<{W_VER}}{Colors.ENDC} "
+                    f"{truncate(update['latest_release_date'], W_DATE):<{W_DATE}} "
+                    f"{truncate(update['eligible_platform'] or update['latest_platform'], W_PLAT):<{W_PLAT}}")
+
+            if win < n:
+                status = f"[{top + 1}-{top + win}/{n}]  (scroll with ↑/↓)"
+            else:
+                status = f"[{n} update{'s' if n != 1 else ''}]"
+            out.append(f"{Colors.BOLD}{status}{Colors.ENDC}")
+
+            sys.stdout.write("\n".join(out))
+            sys.stdout.flush()
+
             key = get_key()
             if key == 'ctrl+c':
-                sys.stdout.write('\033[?25h\n')
-                sys.stdout.flush()
-                print("Update selection cancelled.")
-                sys.exit(0)
+                raise KeyboardInterrupt
             elif key == 'up':
                 cursor_idx = (cursor_idx - 1) % n
             elif key == 'down':
@@ -576,20 +597,15 @@ def select_updates(updates):
                 selected[cursor_idx] = not selected[cursor_idx]
             elif key in ('a', 'A'):
                 if any(selected):
-                    # Untoggle all: uncheck everything, including overrides for held back
+                    # Untoggle all: uncheck everything, including overrides for held back.
                     selected = [False] * n
                 else:
-                    # Toggle all: check all eligible updates, leaving held back ones unchecked
+                    # Toggle all: check eligible updates, leaving held back ones alone.
                     selected = [bool(u["eligible"]) for u in updates]
             elif key == 'enter':
                 break
 
-            sys.stdout.write(f"\033[{n}A")
-            sys.stdout.flush()
-            draw_list()
-
-        # Show cursor
-        sys.stdout.write('\033[?25h\n')
+        sys.stdout.write('\033[?25h\033[?1049l')
         sys.stdout.flush()
 
         chosen = []
@@ -597,33 +613,29 @@ def select_updates(updates):
             if selected[i]:
                 update = updates[i]
                 if not update["eligible"]:
-                    # User explicitly chose to install the held back latest version
+                    # User explicitly chose to install the held back latest version.
                     update["eligible"] = update["latest"]
                     update["eligible_platform"] = update["latest_platform"]
                 chosen.append(update)
         return chosen
 
-    except Exception as e:
-        sys.stdout.write('\033[?25h\n')
+    except KeyboardInterrupt:
+        sys.stdout.write('\033[?25h\033[?1049l')
         sys.stdout.flush()
-        raise e
+        print("Update selection cancelled.")
+        sys.exit(0)
+    except Exception:
+        sys.stdout.write('\033[?25h\033[?1049l')
+        sys.stdout.flush()
+        raise
 
 def install_updates(updates, download_dir, code_binary="code"):
     for update in updates:
         if not update["eligible"]:
             continue
-        pub_name = update["publisher"]
-        ext_name = update["name"]
         version = update["eligible"]
-        platform = update["eligible_platform"]
-        
-        filename = f"{pub_name}.{ext_name}-{version}"
-        if platform and platform != "universal":
-            filename += f"-{platform}"
-        filename += ".vsix"
-        
-        filepath = os.path.join(download_dir, filename)
-        
+        filepath = os.path.join(download_dir, vsix_filename(update))
+
         if not os.path.exists(filepath):
             print(f"{Colors.RED}VSIX file not found for installation: {filepath}{Colors.ENDC}", file=sys.stderr)
             continue
