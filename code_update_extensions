@@ -553,7 +553,7 @@ def select_updates(updates):
                         f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
                         f"{eligible_str} "
                         f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
-                        f"{update['eligible_release_date'] or update['latest_release_date']:<15} "
+                        f"{update['latest_release_date']:<15} "
                         f"{update['eligible_platform'] or update['latest_platform']:<12}")
                 print(f"\r\033[K{line}")
 
@@ -742,7 +742,7 @@ def main():
                       f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
                       f"{eligible_str} "
                       f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
-                      f"{update['eligible_release_date'] or update['latest_release_date']:<15} "
+                      f"{update['latest_release_date']:<15} "
                       f"{update['eligible_platform'] or update['latest_platform']:<12}")
             
             if args.download_dir is not None:
