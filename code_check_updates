@@ -347,24 +347,26 @@ def download_updates(updates, download_dir):
 def main():
     parser = argparse.ArgumentParser(description="Check for VS Code extension updates.")
     parser.add_argument("--include-prerelease", action="store_true", help="Include pre-release versions in update check")
-    parser.add_argument("--code-version", help="VS Code version to check compatibility against (auto-detected if available)")
+    parser.add_argument("--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
     parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory (defaults to current directory if specified without a path)")
     args = parser.parse_args()
 
     enable_colors()
     
     # Determine VS Code version to use for compatibility checks
-    vscode_version = args.code_version
-    if not vscode_version:
+    vscode_version = None
+    if not args.no_code_version_check:
         vscode_version = get_vscode_version()
         
     target_platform = get_local_target_platform()
     
     print(f"{Colors.BLUE}Local Target Platform:{Colors.ENDC} {Colors.BOLD}{target_platform}{Colors.ENDC}")
-    if vscode_version:
+    if args.no_code_version_check:
+        print(f"{Colors.BLUE}VS Code Version Check:{Colors.ENDC} {Colors.BOLD}Disabled{Colors.ENDC}")
+    elif vscode_version:
         print(f"{Colors.BLUE}VS Code Version:{Colors.ENDC} {Colors.BOLD}{vscode_version}{Colors.ENDC}")
     else:
-        print(f"{Colors.YELLOW}Warning: Could not auto-detect VS Code version. Compatibility checks are skipped. Use --code-version to specify one.{Colors.ENDC}")
+        print(f"{Colors.YELLOW}Warning: Could not auto-detect VS Code version. Compatibility checks are skipped.{Colors.ENDC}")
         
     print(f"{Colors.BLUE}Fetching installed VS Code extensions...{Colors.ENDC}")
     
