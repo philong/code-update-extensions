@@ -626,7 +626,7 @@ def select_updates(updates):
             top = max(0, min(top, max(0, n - win)))
 
             out = []
-            out.append(f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Ctrl+C=cancel{Colors.ENDC}")
+            out.append(f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Esc/Ctrl+C=cancel{Colors.ENDC}")
             out.append(f"{Colors.BOLD}{'':6}{'Extension ID':<{id_w}} {'Installed':<{W_VER}} "
                        f"{'Eligible':<{W_VER}} {'Latest':<{W_VER}} {'Release':<{W_DATE}} {'Platform':<{W_PLAT}}{Colors.ENDC}")
             out.append("-" * min(cols, row_width))
@@ -676,7 +676,7 @@ def select_updates(updates):
             sys.stdout.flush()
 
             key = get_key()
-            if key == 'ctrl+c':
+            if key in ('ctrl+c', 'esc'):
                 raise KeyboardInterrupt
             elif key == 'up':
                 cursor_idx = (cursor_idx - 1) % n
