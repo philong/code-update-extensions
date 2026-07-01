@@ -101,14 +101,26 @@ def parse_version(v_str):
             
     return (tuple(comparable_main), is_release, tuple(comparable_pre))
 
+def run_code_cmd(args, retries=3, delay=1.0):
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+        except subprocess.CalledProcessError as e:
+            if attempt < retries:
+                cmd_str = " ".join(args)
+                print(f"{Colors.YELLOW}Warning: Command '{cmd_str}' failed with exit code {e.returncode}. Retrying in {delay}s... (attempt {attempt + 1}/{retries}){Colors.ENDC}", file=sys.stderr)
+                time.sleep(delay)
+                continue
+            raise e
+
 def get_installed_extensions(code_binary="code"):
     try:
-        result = subprocess.run(
-            [code_binary, "--list-extensions", "--show-versions"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        result = run_code_cmd([code_binary, "--list-extensions", "--show-versions"])
         output = result.stdout
     except Exception as e:
         print(f"{Colors.RED}Error running '{code_binary} --list-extensions --show-versions': {e}{Colors.ENDC}", file=sys.stderr)
@@ -133,12 +145,7 @@ def is_prerelease(version_obj):
 
 def get_vscode_version(code_binary="code"):
     try:
-        result = subprocess.run(
-            [code_binary, "--version"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        result = run_code_cmd([code_binary, "--version"])
         lines = result.stdout.strip().splitlines()
         if lines:
             return lines[0].strip()
@@ -724,12 +731,7 @@ def install_updates(updates, download_dir, code_binary="code"):
             
         print(f"Installing {Colors.CYAN}{update['id']}{Colors.ENDC} v{Colors.GREEN}{version}{Colors.ENDC}...")
         try:
-            result = subprocess.run(
-                [code_binary, "--install-extension", filepath],
-                capture_output=True,
-                text=True,
-                check=True
-            )
+            result = run_code_cmd([code_binary, "--install-extension", filepath])
             print(f"  {Colors.GREEN}✓{Colors.ENDC} Installed successfully.")
         except subprocess.CalledProcessError as e:
             print(f"  {Colors.RED}✗ Installation failed: {e.stderr.strip() or e}{Colors.ENDC}", file=sys.stderr)
