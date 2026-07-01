@@ -590,9 +590,16 @@ def select_updates(updates):
     # Per-row width excluding the id column: "P C[xxx] <id> v v v d p" with single-space gaps.
     OVERHEAD = 6 + 1 + (W_VER + 1) * 3 + (W_DATE + 1) + W_PLAT
 
-    # Render into the alternate screen buffer and fully repaint each frame, so wrapped
-    # lines or lists taller than the terminal can never corrupt the display.
-    sys.stdout.write('\033[?1049h\033[?25l')
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+    def visual_len(s):
+        return len(ansi_escape.sub('', s))
+
+    first_frame = True
+    prev_lines = 0
+
+    # Hide the cursor and repaint each frame in-place, so wrapped lines or lists
+    # taller than the terminal can never corrupt the display.
+    sys.stdout.write('\033[?25l')
     sys.stdout.flush()
 
     try:
@@ -611,7 +618,7 @@ def select_updates(updates):
                 top = cursor_idx - win + 1
             top = max(0, min(top, max(0, n - win)))
 
-            out = ['\033[H\033[2J']
+            out = []
             out.append(f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Ctrl+C=cancel{Colors.ENDC}")
             out.append(f"{Colors.BOLD}{'':6}{'Extension ID':<{id_w}} {'Installed':<{W_VER}} "
                        f"{'Eligible':<{W_VER}} {'Latest':<{W_VER}} {'Release':<{W_DATE}} {'Platform':<{W_PLAT}}{Colors.ENDC}")
@@ -640,6 +647,24 @@ def select_updates(updates):
                 status = f"[{n} update{'s' if n != 1 else ''}]"
             out.append(f"{Colors.BOLD}{status}{Colors.ENDC}")
 
+            # Repaint logic: move cursor to the top of the previously rendered area
+            # and clear from the cursor to the bottom of the screen.
+            if not first_frame:
+                if prev_lines > 1:
+                    sys.stdout.write(f"\r\033[{prev_lines - 1}A")
+                else:
+                    sys.stdout.write("\r")
+                sys.stdout.write("\033[J")
+            else:
+                first_frame = False
+
+            # Calculate total terminal lines this frame will print
+            total_lines = 0
+            for line in out:
+                vlen = visual_len(line)
+                total_lines += max(1, -(-vlen // cols))
+            prev_lines = total_lines
+
             sys.stdout.write("\n".join(out))
             sys.stdout.flush()
 
@@ -662,7 +687,7 @@ def select_updates(updates):
             elif key == 'enter':
                 break
 
-        sys.stdout.write('\033[?25h\033[?1049l')
+        sys.stdout.write('\n\033[?25h')
         sys.stdout.flush()
 
         chosen = []
@@ -677,12 +702,12 @@ def select_updates(updates):
         return chosen
 
     except KeyboardInterrupt:
-        sys.stdout.write('\033[?25h\033[?1049l')
+        sys.stdout.write('\n\033[?25h')
         sys.stdout.flush()
         print("Update selection cancelled.")
         sys.exit(0)
     except Exception:
-        sys.stdout.write('\033[?25h\033[?1049l')
+        sys.stdout.write('\n\033[?25h')
         sys.stdout.flush()
         raise
 
