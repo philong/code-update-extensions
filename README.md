@@ -45,6 +45,32 @@ No external Python dependencies are required (uses standard library modules like
 
 ---
 
+## Configuration File
+
+You can configure defaults and skip rules via a TOML configuration file at `~/.config/code_update_extensions/config.toml`. Options specified via command line arguments will override those in the configuration file.
+
+### Example Configuration
+
+```toml
+# Configuration options (hyphenated or snake_case keys are both accepted)
+min-release-age = "12h"
+include-prerelease = false
+no-code-version-check = false
+code-binary = "code"
+
+# Extensions to ignore entirely during updates
+ignore = [
+    "ms-python.python"
+]
+
+# Specific versions of extensions to skip (ulterior versions will still be installed)
+[skip_versions]
+"vscjava.vscode-gradle" = "3.17.3"
+"golang.go" = ["0.39.0", "0.39.1"]
+```
+
+---
+
 ## Examples
 
 ### 1. Interactive Mode (Default)

@@ -236,8 +236,11 @@ def parse_age_threshold(age_str):
         return datetime.timedelta(minutes=value)
     return datetime.timedelta(0)
 
-def check_updates(installed_exts, target_platform, vscode_version=None, exclude_prerelease=True, min_release_age=None):
+def check_updates(installed_exts, target_platform, vscode_version=None, exclude_prerelease=True, min_release_age=None, skip_versions=None, ignore_extensions=None):
     ext_ids = list(installed_exts.keys())
+    if ignore_extensions:
+        ignored_set = {x.lower() for x in ignore_extensions}
+        ext_ids = [eid for eid in ext_ids if eid not in ignored_set]
     batch_size = 50
     updates = []
     
@@ -354,6 +357,11 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
             # Filter compatible versions
             compatible_versions = []
             for ver_obj in ext.get("versions", []):
+                version_str = ver_obj.get("version")
+                # Exclude skipped versions from config
+                if skip_versions and full_id in skip_versions:
+                    if version_str in skip_versions[full_id]:
+                        continue
                 # Exclude pre-releases if requested
                 if exclude_prerelease and is_prerelease(ver_obj):
                     continue
@@ -737,38 +745,251 @@ def install_updates(updates, download_dir, code_binary="code"):
             print(f"  {Colors.RED}✗ Installation failed: {e.stderr.strip() or e}{Colors.ENDC}", file=sys.stderr)
         except Exception as e:
             print(f"  {Colors.RED}✗ Installation failed: {e}{Colors.ENDC}", file=sys.stderr)
+def strip_comment(line):
+    in_quote = None
+    for i, char in enumerate(line):
+        if char in ('"', "'"):
+            if in_quote == char:
+                in_quote = None
+            elif in_quote is None:
+                in_quote = char
+        elif char == '#' and in_quote is None:
+            return line[:i].strip()
+    return line.strip()
+
+def parse_toml_fallback(content):
+    data = {}
+    current_section = None
+    
+    # Pre-process content to handle multi-line arrays
+    lines = []
+    accumulator = []
+    in_array = False
+    
+    for raw_line in content.splitlines():
+        line = strip_comment(raw_line)
+        if not line:
+            continue
+        
+        # Section header
+        if line.startswith('[') and line.endswith(']') and not in_array:
+            if accumulator:
+                lines.append(" ".join(accumulator))
+                accumulator = []
+            lines.append(line)
+            continue
+            
+        if '=' in line or in_array:
+            if '=' in line and not in_array:
+                if accumulator:
+                    lines.append(" ".join(accumulator))
+                    accumulator = []
+                accumulator.append(line)
+            else:
+                accumulator.append(line)
+            
+            # Check if brackets are balanced in accumulator
+            joined = " ".join(accumulator)
+            # Count brackets outside quotes
+            open_brackets = 0
+            in_quote = None
+            for char in joined:
+                if char in ('"', "'"):
+                    if in_quote == char:
+                        in_quote = None
+                    elif in_quote is None:
+                        in_quote = char
+                elif in_quote is None:
+                    if char == '[':
+                        open_brackets += 1
+                    elif char == ']':
+                        open_brackets -= 1
+            
+            if open_brackets <= 0:
+                lines.append(joined)
+                accumulator = []
+                in_array = False
+            else:
+                in_array = True
+        else:
+            if accumulator:
+                accumulator.append(line)
+            else:
+                lines.append(line)
+                
+    if accumulator:
+        lines.append(" ".join(accumulator))
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        if line.startswith('[') and line.endswith(']'):
+            current_section = line[1:-1].strip()
+            if current_section not in data:
+                data[current_section] = {}
+            continue
+            
+        if '=' in line:
+            key, val = line.split('=', 1)
+            key = key.strip().strip('"').strip("'")
+            val = val.strip()
+            
+            if val.startswith('[') and val.endswith(']'):
+                items = []
+                in_quote = None
+                current_item = []
+                for char in val[1:-1]:
+                    if char in ('"', "'"):
+                        if in_quote == char:
+                            in_quote = None
+                        elif in_quote is None:
+                            in_quote = char
+                    elif char == ',' and in_quote is None:
+                        items.append("".join(current_item).strip().strip('"').strip("'"))
+                        current_item = []
+                    else:
+                        current_item.append(char)
+                if current_item:
+                    items.append("".join(current_item).strip().strip('"').strip("'"))
+                parsed_val = [x for x in items if x]
+            elif val.lower() == 'true':
+                parsed_val = True
+            elif val.lower() == 'false':
+                parsed_val = False
+            else:
+                parsed_val = val.strip('"').strip("'")
+                
+            if current_section:
+                if current_section not in data:
+                    data[current_section] = {}
+                data[current_section][key] = parsed_val
+            else:
+                data[key] = parsed_val
+    return data
+
+def load_config():
+    config_path = os.path.expanduser("~/.config/code_update_extensions/config.toml")
+    config = {
+        "skip_versions": {},
+        "ignore": []
+    }
+    if not os.path.exists(config_path):
+        return config
+
+    try:
+        try:
+            import tomllib
+            with open(config_path, "rb") as f:
+                parsed = tomllib.load(f)
+        except ImportError:
+            try:
+                import tomli as tomllib
+                with open(config_path, "rb") as f:
+                    parsed = tomllib.load(f)
+            except ImportError:
+                try:
+                    import toml
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        parsed = toml.load(f)
+                except ImportError:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        parsed = parse_toml_fallback(f.read())
+    except Exception as e:
+        print(f"{Colors.YELLOW}Warning: Failed to parse config file '{config_path}': {e}{Colors.ENDC}", file=sys.stderr)
+        return config
+
+    # Parse [skip_versions]
+    skip_versions = parsed.get("skip_versions", {})
+    if isinstance(skip_versions, dict):
+        for ext_id, val in skip_versions.items():
+            ext_id_lower = ext_id.lower()
+            if isinstance(val, str):
+                config["skip_versions"][ext_id_lower] = [val]
+            elif isinstance(val, list):
+                config["skip_versions"][ext_id_lower] = [str(v) for v in val]
+            else:
+                config["skip_versions"][ext_id_lower] = [str(val)]
+
+    # Parse ignore
+    ignore = parsed.get("ignore", parsed.get("ignore_extensions", []))
+    if not isinstance(ignore, list):
+        if isinstance(ignore, str):
+            ignore = [ignore]
+        else:
+            ignore = []
+    config["ignore"] = [str(eid).strip().lower() for eid in ignore]
+
+    # Copy other keys
+    for k in ["min_release_age", "min-release-age",
+              "include_prerelease", "include-prerelease",
+              "no_code_version_check", "no-code-version-check",
+              "code_binary", "code-binary",
+              "download_dir", "download-dir",
+              "yes"]:
+        val = parsed.get(k)
+        if val is not None:
+            config[k] = val
+            
+    return config
+
+def get_config_val(config, key, default=None):
+    # Try underscore
+    val = config.get(key.replace('-', '_'))
+    if val is not None:
+        return val
+    # Try hyphen
+    val = config.get(key.replace('_', '-'))
+    if val is not None:
+        return val
+    return default
+
 def main():
     parser = argparse.ArgumentParser(description="Check, download, and install VS Code extension updates.")
-    parser.add_argument("-p", "--include-prerelease", action="store_true", help="Include pre-release versions in update check")
-    parser.add_argument("-n", "--no-code-version-check", action="store_true", help="Disable VS Code version compatibility check")
-    parser.add_argument("-b", "--code-binary", default="code", help="Path to VS Code binary/executable or its fork (default: code)")
-    parser.add_argument("-d", "--download-dir", nargs="?", const=".", help="Download updates to the specified directory. In interactive mode, this defaults to the system temporary directory if not specified. If specified without a path, defaults to the current directory.")
-    parser.add_argument("-y", "--yes", action="store_true", help="Automatically download and install all updates without prompting (useful for non-interactive environments)")
-    parser.add_argument("-a", "--min-release-age", default="24h", help="Minimum age of a release to be considered for update (e.g. 24h, 1d) to mitigate supply chain attacks (default: 24h)")
+    parser.add_argument("-p", "--include-prerelease", action="store_true", default=None, help="Include pre-release versions in update check")
+    parser.add_argument("-n", "--no-code-version-check", action="store_true", default=None, help="Disable VS Code version compatibility check")
+    parser.add_argument("-b", "--code-binary", default=None, help="Path to VS Code binary/executable or its fork (default: code)")
+    parser.add_argument("-d", "--download-dir", nargs="?", const=".", default=None, help="Download updates to the specified directory. In interactive mode, this defaults to the system temporary directory if not specified. If specified without a path, defaults to the current directory.")
+    parser.add_argument("-y", "--yes", action="store_true", default=None, help="Automatically download and install all updates without prompting (useful for non-interactive environments)")
+    parser.add_argument("-a", "--min-release-age", default=None, help="Minimum age of a release to be considered for update (e.g. 24h, 1d) to mitigate supply chain attacks (default: 24h)")
     args = parser.parse_args()
 
     enable_colors()
     
+    # Load config file
+    config = load_config()
+    
+    # Resolve parameters (command line overrides config overrides default)
+    include_prerelease = args.include_prerelease if args.include_prerelease is not None else get_config_val(config, "include_prerelease", False)
+    no_code_version_check = args.no_code_version_check if args.no_code_version_check is not None else get_config_val(config, "no_code_version_check", False)
+    code_binary_val = args.code_binary if args.code_binary is not None else get_config_val(config, "code_binary", "code")
+    yes = args.yes if args.yes is not None else get_config_val(config, "yes", False)
+    min_release_age_str = args.min_release_age if args.min_release_age is not None else get_config_val(config, "min_release_age", "24h")
+    
+    download_dir_is_temp = (args.download_dir is None and get_config_val(config, "download_dir") is None)
+    download_dir = args.download_dir if args.download_dir is not None else get_config_val(config, "download_dir", None)
+    
     try:
-        min_release_age = parse_age_threshold(args.min_release_age)
+        min_release_age = parse_age_threshold(min_release_age_str)
     except ValueError as e:
         print(f"{Colors.RED}Error: {e}{Colors.ENDC}", file=sys.stderr)
         sys.exit(1)
     
-    code_binary_path = os.path.expanduser(args.code_binary)
+    code_binary_path = os.path.expanduser(code_binary_val)
     code_binary = shutil.which(code_binary_path) or code_binary_path
 
     # Determine VS Code version to use for compatibility checks
     vscode_version = None
-    if not args.no_code_version_check:
+    if not no_code_version_check:
         vscode_version = get_vscode_version(code_binary)
         
     target_platform = get_local_target_platform()
     
     print(f"{Colors.BLUE}Local Target Platform:{Colors.ENDC} {Colors.BOLD}{target_platform}{Colors.ENDC}")
     if min_release_age > datetime.timedelta(0):
-        print(f"{Colors.BLUE}Min Release Age:{Colors.ENDC} {Colors.BOLD}{args.min_release_age}{Colors.ENDC}")
-    if args.no_code_version_check:
+        print(f"{Colors.BLUE}Min Release Age:{Colors.ENDC} {Colors.BOLD}{min_release_age_str}{Colors.ENDC}")
+    if no_code_version_check:
         print(f"{Colors.BLUE}VS Code Version Check:{Colors.ENDC} {Colors.BOLD}Disabled{Colors.ENDC}")
     elif vscode_version:
         print(f"{Colors.BLUE}VS Code Version:{Colors.ENDC} {Colors.BOLD}{vscode_version}{Colors.ENDC}")
@@ -783,33 +1004,43 @@ def main():
         return
         
     print(f"Found {len(installed_exts)} extensions installed.")
-    print(f"{Colors.BLUE}Checking updates on VS Code Marketplace (excluding pre-releases: {not args.include_prerelease})...{Colors.ENDC}")
+    print(f"{Colors.BLUE}Checking updates on VS Code Marketplace (excluding pre-releases: {not include_prerelease})...{Colors.ENDC}")
     
-    updates = check_updates(installed_exts, target_platform, vscode_version=vscode_version, exclude_prerelease=not args.include_prerelease, min_release_age=min_release_age)
+    skip_versions = config.get("skip_versions", {})
+    ignore_extensions = config.get("ignore", [])
+    updates = check_updates(
+        installed_exts, 
+        target_platform, 
+        vscode_version=vscode_version, 
+        exclude_prerelease=not include_prerelease, 
+        min_release_age=min_release_age,
+        skip_versions=skip_versions,
+        ignore_extensions=ignore_extensions
+    )
     
     print()
     if updates:
-        if args.yes:
-            download_dir = args.download_dir if args.download_dir is not None else tempfile.gettempdir()
-            print(f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir}{Colors.ENDC}")
-            download_updates(updates, download_dir)
+        if yes:
+            download_dir_resolved = download_dir if download_dir is not None else tempfile.gettempdir()
+            print(f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}")
+            download_updates(updates, download_dir_resolved)
             print()
             print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
-            install_updates(updates, download_dir, code_binary=code_binary)
-            if args.download_dir is None:
-                cleanup_temp_files(updates, download_dir)
+            install_updates(updates, download_dir_resolved, code_binary=code_binary)
+            if download_dir_is_temp:
+                cleanup_temp_files(updates, download_dir_resolved)
         elif HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty():
             selected_updates = select_updates(updates)
             if selected_updates:
                 print()
-                download_dir = args.download_dir if args.download_dir is not None else tempfile.gettempdir()
-                print(f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir}{Colors.ENDC}")
-                download_updates(selected_updates, download_dir)
+                download_dir_resolved = download_dir if download_dir is not None else tempfile.gettempdir()
+                print(f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}")
+                download_updates(selected_updates, download_dir_resolved)
                 print()
                 print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
-                install_updates(selected_updates, download_dir, code_binary=code_binary)
-                if args.download_dir is None:
-                    cleanup_temp_files(selected_updates, download_dir)
+                install_updates(selected_updates, download_dir_resolved, code_binary=code_binary)
+                if download_dir_is_temp:
+                    cleanup_temp_files(selected_updates, download_dir_resolved)
             else:
                 print("No updates selected for installation.")
         else:
@@ -829,10 +1060,10 @@ def main():
                       f"{update['latest_release_date']:<15} "
                       f"{update['eligible_platform'] or update['latest_platform']:<12}")
             
-            if args.download_dir is not None:
+            if download_dir is not None:
                 print()
-                print(f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{args.download_dir}{Colors.ENDC}")
-                download_updates(updates, args.download_dir)
+                print(f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir}{Colors.ENDC}")
+                download_updates(updates, download_dir)
     else:
         print(f"{Colors.GREEN}All extensions are up to date!{Colors.ENDC}")
 
