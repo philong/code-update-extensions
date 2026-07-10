@@ -907,7 +907,9 @@ def install_updates(updates, download_dir, code_binary="code"):
             f"Installing {Colors.CYAN}{update['id']}{Colors.ENDC} v{Colors.GREEN}{version}{Colors.ENDC}..."
         )
         try:
-            result = run_code_cmd([code_binary, "--install-extension", filepath])
+            # No retries: install failures are deterministic (bad VSIX, engine
+            # mismatch), so retrying just repeats the same error with delays.
+            run_code_cmd([code_binary, "--install-extension", filepath], retries=0)
             print(f"  {Colors.GREEN}✓{Colors.ENDC} Installed successfully.")
         except subprocess.CalledProcessError as e:
             print(
