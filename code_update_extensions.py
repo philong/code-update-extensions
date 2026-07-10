@@ -579,6 +579,7 @@ def vsix_filename(update):
 
 def download_updates(updates, download_dir):
     os.makedirs(download_dir, exist_ok=True)
+    show_progress = sys.stdout.isatty()
     for update in updates:
         if not update["eligible"]:
             continue
@@ -625,6 +626,8 @@ def download_updates(updates, download_dir):
                     chunks.append(chunk)
                     bytes_read += len(chunk)
 
+                    if not show_progress:
+                        continue
                     if total_size and total_size > 0:
                         percent = (bytes_read * 100) // total_size
                         bar_len = 30
@@ -645,7 +648,7 @@ def download_updates(updates, download_dir):
                         sys.stdout.write(f"\r  Downloaded: {read_mb:.2f}MB")
                         sys.stdout.flush()
 
-                if total_size or bytes_read > 0:
+                if show_progress and (total_size or bytes_read > 0):
                     sys.stdout.write("\n")
                     sys.stdout.flush()
 
