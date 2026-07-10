@@ -563,6 +563,7 @@ def check_updates(
                     }
                 )
 
+    updates.sort(key=lambda u: u["id"])
     return updates
 
 
