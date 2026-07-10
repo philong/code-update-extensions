@@ -99,9 +99,7 @@ def parse_version(v_str):
 
     # Semver: numeric identifiers have lower precedence than alphanumeric ones.
     def comparable(parts):
-        return tuple(
-            (0, x) if isinstance(x, int) else (1, str(x)) for x in parts
-        )
+        return tuple((0, x) if isinstance(x, int) else (1, str(x)) for x in parts)
 
     return (comparable(parsed_ints), is_release, comparable(prerelease_parts))
 
@@ -515,9 +513,7 @@ def check_updates(
                                 cleaned_ts = last_updated
                                 if cleaned_ts.endswith("Z"):
                                     cleaned_ts = cleaned_ts[:-1] + "+00:00"
-                                release_dt = datetime.datetime.fromisoformat(
-                                    cleaned_ts
-                                )
+                                release_dt = datetime.datetime.fromisoformat(cleaned_ts)
                                 now = datetime.datetime.now(datetime.timezone.utc)
                                 if now - release_dt < min_release_age:
                                     continue
