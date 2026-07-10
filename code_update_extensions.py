@@ -202,6 +202,8 @@ def is_engine_compatible(vscode_version_str, engine_constraint):
         op = ">="
     parsed_vscode = parse_version(vscode_version_str)
     parsed_constraint = parse_version(version_str)
+    if op in ("=", "=="):
+        return parsed_vscode[0] == parsed_constraint[0]
     if op == ">=":
         return parsed_vscode >= parsed_constraint
     elif op == ">":
