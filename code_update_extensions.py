@@ -377,6 +377,7 @@ def check_updates(
 
                 # retry_reason is set to a short description only for transient failures.
                 retry_reason = None
+                retry_after = None
                 try:
                     with urllib.request.urlopen(req, timeout=30) as response:
                         resp_data = json.loads(response.read().decode("utf-8"))
@@ -391,6 +392,11 @@ def check_updates(
                     err = e
                     if 500 <= e.code < 600:
                         retry_reason = f"returned HTTP status {e.code}"
+                    elif e.code == 429:
+                        retry_reason = "rate limited (HTTP 429)"
+                        ra = e.headers.get("Retry-After")
+                        if ra and ra.strip().isdigit():
+                            retry_after = float(ra.strip())
                 except (urllib.error.URLError, TimeoutError) as e:
                     # Read timeouts surface as a bare TimeoutError; connect timeouts come
                     # wrapped in URLError with a "timed out" reason.
@@ -406,14 +412,15 @@ def check_updates(
                     err = e
 
                 if retry_reason and attempt < max_retries:
+                    delay = retry_after if retry_after is not None else backoff
                     if sys.stdout.isatty():
                         sys.stdout.write("\r\033[K")
                         sys.stdout.flush()
                     print(
-                        f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {backoff}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
+                        f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
                         file=sys.stderr,
                     )
-                    time.sleep(backoff)
+                    time.sleep(delay)
                     backoff *= 2.0
                 else:
                     if sys.stdout.isatty():
