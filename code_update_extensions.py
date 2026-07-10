@@ -1247,7 +1247,7 @@ def main():
 
     print(f"Found {len(installed_exts)} extensions installed.")
     print(
-        f"{Colors.BLUE}Checking updates on VS Code Marketplace (excluding pre-releases: {not include_prerelease})...{Colors.ENDC}"
+        f"{Colors.BLUE}Checking updates on VS Code Marketplace (including pre-releases: {include_prerelease})...{Colors.ENDC}"
     )
 
     skip_versions = config.get("skip_versions", {})
