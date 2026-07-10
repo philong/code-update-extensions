@@ -12,6 +12,7 @@ import tempfile
 import shutil
 import datetime
 import time
+import hashlib
 
 try:
     import tty
@@ -236,7 +237,24 @@ def parse_age_threshold(age_str):
         return datetime.timedelta(minutes=value)
     return datetime.timedelta(0)
 
+def cleanup_stale_cache():
+    try:
+        temp_dir = tempfile.gettempdir()
+        now = time.time()
+        for filename in os.listdir(temp_dir):
+            if filename.startswith("vscode_ext_cache_") and filename.endswith(".json"):
+                filepath = os.path.join(temp_dir, filename)
+                try:
+                    if now - os.path.getmtime(filepath) > 3600:
+                        os.remove(filepath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def check_updates(installed_exts, target_platform, vscode_version=None, exclude_prerelease=True, min_release_age=None, skip_versions=None, ignore_extensions=None):
+    cleanup_stale_cache()
     ext_ids = list(installed_exts.keys())
     if ignore_extensions:
         ignored_set = {x.lower() for x in ignore_extensions}
@@ -272,61 +290,81 @@ def check_updates(installed_exts, target_platform, vscode_version=None, exclude_
         }
         
         req_data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1",
-            data=req_data,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json; api-version=7.2-preview.1"
-            },
-            method="POST"
-        )
+        
+        # Check cache
+        payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        cache_file = os.path.join(tempfile.gettempdir(), f"vscode_ext_cache_{payload_hash}.json")
         
         resp_data = None
-        max_retries = 3
-        backoff = 2.0
-        for attempt in range(max_retries + 1):
-            if attempt > 0 and sys.stdout.isatty():
-                percent = (i * 100) // len(ext_ids)
-                bar_len = 20
-                filled_len = int(round(bar_len * i / float(len(ext_ids))))
-                bar = '=' * filled_len + ' ' * (bar_len - filled_len)
-                sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({i}/{len(ext_ids)}) (retry {attempt})")
-                sys.stdout.flush()
-
-            # retry_reason is set to a short description only for transient failures.
-            retry_reason = None
+        if os.path.exists(cache_file):
             try:
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    resp_data = json.loads(response.read().decode("utf-8"))
-                break
-            except urllib.error.HTTPError as e:
-                err = e
-                if 500 <= e.code < 600:
-                    retry_reason = f"returned HTTP status {e.code}"
-            except (urllib.error.URLError, TimeoutError) as e:
-                # Read timeouts surface as a bare TimeoutError; connect timeouts come
-                # wrapped in URLError with a "timed out" reason.
-                err = e
-                reason = str(getattr(e, "reason", e)).lower()
-                if isinstance(e, TimeoutError) or "timed out" in reason or "timeout" in reason:
-                    retry_reason = "request timed out"
-            except Exception as e:
-                err = e
+                if time.time() - os.path.getmtime(cache_file) < 3600:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        resp_data = json.load(f)
+            except Exception:
+                pass
 
-            if retry_reason and attempt < max_retries:
-                if sys.stdout.isatty():
-                    sys.stdout.write("\r\033[K")
+        if resp_data is None:
+            req = urllib.request.Request(
+                "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1",
+                data=req_data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json; api-version=7.2-preview.1"
+                },
+                method="POST"
+            )
+            
+            max_retries = 3
+            backoff = 2.0
+            for attempt in range(max_retries + 1):
+                if attempt > 0 and sys.stdout.isatty():
+                    percent = (i * 100) // len(ext_ids)
+                    bar_len = 20
+                    filled_len = int(round(bar_len * i / float(len(ext_ids))))
+                    bar = '=' * filled_len + ' ' * (bar_len - filled_len)
+                    sys.stdout.write(f"\r\033[KChecking updates: [{bar}] {percent}% ({i}/{len(ext_ids)}) (retry {attempt})")
                     sys.stdout.flush()
-                print(f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {backoff}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}", file=sys.stderr)
-                time.sleep(backoff)
-                backoff *= 2.0
-            else:
-                if sys.stdout.isatty():
-                    sys.stdout.write("\r\033[K")
-                    sys.stdout.flush()
-                print(f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}", file=sys.stderr)
-                break
+
+                # retry_reason is set to a short description only for transient failures.
+                retry_reason = None
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        resp_data = json.loads(response.read().decode("utf-8"))
+                    # Write to cache
+                    try:
+                        with open(cache_file, "w", encoding="utf-8") as f:
+                            json.dump(resp_data, f)
+                    except Exception:
+                        pass
+                    break
+                except urllib.error.HTTPError as e:
+                    err = e
+                    if 500 <= e.code < 600:
+                        retry_reason = f"returned HTTP status {e.code}"
+                except (urllib.error.URLError, TimeoutError) as e:
+                    # Read timeouts surface as a bare TimeoutError; connect timeouts come
+                    # wrapped in URLError with a "timed out" reason.
+                    err = e
+                    reason = str(getattr(e, "reason", e)).lower()
+                    if isinstance(e, TimeoutError) or "timed out" in reason or "timeout" in reason:
+                        retry_reason = "request timed out"
+                except Exception as e:
+                    err = e
+
+                if retry_reason and attempt < max_retries:
+                    if sys.stdout.isatty():
+                        sys.stdout.write("\r\033[K")
+                        sys.stdout.flush()
+                    print(f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {backoff}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}", file=sys.stderr)
+                    time.sleep(backoff)
+                    backoff *= 2.0
+                else:
+                    if sys.stdout.isatty():
+                        sys.stdout.write("\r\033[K")
+                        sys.stdout.flush()
+                    print(f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}", file=sys.stderr)
+                    break
 
         if sys.stdout.isatty():
             current_count = min(i + batch_size, len(ext_ids))
