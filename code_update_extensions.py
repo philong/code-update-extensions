@@ -874,6 +874,7 @@ def select_updates(updates):
                     # User explicitly chose to install the held back latest version.
                     update["eligible"] = update["latest"]
                     update["eligible_platform"] = update["latest_platform"]
+                    update["eligible_release_date"] = update["latest_release_date"]
                 chosen.append(update)
         return chosen
 
