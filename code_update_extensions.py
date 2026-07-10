@@ -1127,6 +1127,27 @@ def load_config():
     return config
 
 
+def print_updates_table(updates):
+    print(
+        f"{Colors.BOLD}{'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}{Colors.ENDC}"
+    )
+    print("-" * 115)
+    for update in updates:
+        if update["eligible"]:
+            eligible_str = f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
+        else:
+            eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
+
+        print(
+            f"{Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
+            f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
+            f"{eligible_str} "
+            f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
+            f"{update['latest_release_date']:<15} "
+            f"{update['eligible_platform'] or update['latest_platform']:<12}"
+        )
+
+
 def get_config_val(config, key, default=None):
     # Try underscore
     val = config.get(key.replace("-", "_"))
@@ -1286,6 +1307,9 @@ def main():
     print()
     if updates:
         if yes:
+            print(f"{Colors.GREEN}{Colors.BOLD}Updates available:{Colors.ENDC}")
+            print_updates_table(updates)
+            print()
             download_dir_resolved = (
                 download_dir if download_dir is not None else tempfile.gettempdir()
             )
@@ -1320,26 +1344,7 @@ def main():
                 print("No updates selected for installation.")
         else:
             print(f"{Colors.GREEN}{Colors.BOLD}Updates available:{Colors.ENDC}")
-            print(
-                f"{Colors.BOLD}{'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}{Colors.ENDC}"
-            )
-            print("-" * 115)
-            for update in updates:
-                if update["eligible"]:
-                    eligible_str = (
-                        f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
-                    )
-                else:
-                    eligible_str = f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
-
-                print(
-                    f"{Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
-                    f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
-                    f"{eligible_str} "
-                    f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
-                    f"{update['latest_release_date']:<15} "
-                    f"{update['eligible_platform'] or update['latest_platform']:<12}"
-                )
+            print_updates_table(updates)
 
             if download_dir is not None:
                 print()
