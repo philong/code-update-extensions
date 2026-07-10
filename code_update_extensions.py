@@ -97,21 +97,13 @@ def parse_version(v_str):
                 pre_parsed.append(x)
         prerelease_parts = tuple(pre_parsed)
 
-    comparable_main = []
-    for x in parsed_ints:
-        if isinstance(x, int):
-            comparable_main.append((1, x))
-        else:
-            comparable_main.append((0, str(x)))
+    # Semver: numeric identifiers have lower precedence than alphanumeric ones.
+    def comparable(parts):
+        return tuple(
+            (0, x) if isinstance(x, int) else (1, str(x)) for x in parts
+        )
 
-    comparable_pre = []
-    for x in prerelease_parts:
-        if isinstance(x, int):
-            comparable_pre.append((1, x))
-        else:
-            comparable_pre.append((0, str(x)))
-
-    return (tuple(comparable_main), is_release, tuple(comparable_pre))
+    return (comparable(parsed_ints), is_release, comparable(prerelease_parts))
 
 
 def run_code_cmd(args, retries=3, delay=1.0):
