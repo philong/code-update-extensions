@@ -43,20 +43,24 @@ No external Python dependencies are required (uses standard library modules like
 | `--yes` | `-y` | Run non-interactively; automatically downloads and installs all updates. |
 | `--min-release-age <age>` | `-a` | Minimum release age (e.g., `24h`, `3d`, `12h`) to mitigate supply-chain risks (default: `24h`). |
 
+Boolean flags set in the configuration file can be overridden back from the command line with `--no-include-prerelease`, `--code-version-check`, and `--no-yes`.
+
 ---
 
 ## Configuration File
 
-You can configure defaults and skip rules via a TOML configuration file at `~/.config/code_update_extensions/config.toml`. Options specified via command line arguments will override those in the configuration file.
+You can set defaults for all command line flags and configure skip rules via a TOML configuration file at `~/.config/code_update_extensions/config.toml`. Options specified via command line arguments will override those in the configuration file. Unknown keys or values with the wrong type produce a warning and are ignored.
 
 ### Example Configuration
 
 ```toml
-# Configuration options (hyphenated or snake_case keys are both accepted)
-min-release-age = "12h"
-include-prerelease = false
-no-code-version-check = false
-code-binary = "code"
+# Defaults for command line flags (hyphenated or snake_case keys are both accepted)
+min-release-age = "12h"        # -a, --min-release-age
+include-prerelease = false     # -p, --include-prerelease
+no-code-version-check = false  # -n, --no-code-version-check
+code-binary = "code"           # -b, --code-binary
+download-dir = "~/Downloads"   # -d, --download-dir
+yes = false                    # -y, --yes
 
 # Extensions to ignore entirely during updates
 ignore = [

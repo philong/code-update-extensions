@@ -1047,6 +1047,31 @@ def parse_toml_fallback(content):
     return data
 
 
+# Top-level config keys that mirror command line flags, with expected type.
+CONFIG_OPTION_TYPES = {
+    "include_prerelease": bool,
+    "no_code_version_check": bool,
+    "yes": bool,
+    "code_binary": str,
+    "download_dir": str,
+    "min_release_age": str,
+}
+
+
+def coerce_config_value(val, expected_type):
+    if expected_type is bool:
+        if isinstance(val, bool):
+            return val
+        # The fallback TOML parser only converts unquoted true/false; accept
+        # quoted "true"/"false" too so a common mistake still works.
+        if isinstance(val, str) and val.strip().lower() in ("true", "false"):
+            return val.strip().lower() == "true"
+        raise ValueError(f"expected true or false, got {val!r}")
+    if isinstance(val, str):
+        return val
+    raise ValueError(f"expected a string, got {val!r}")
+
+
 def load_config():
     config_path = os.path.expanduser("~/.config/code_update_extensions/config.toml")
     config = {"skip_versions": {}, "ignore": []}
@@ -1102,23 +1127,25 @@ def load_config():
             ignore = []
     config["ignore"] = [str(eid).strip().lower() for eid in ignore]
 
-    # Copy other keys
-    for k in [
-        "min_release_age",
-        "min-release-age",
-        "include_prerelease",
-        "include-prerelease",
-        "no_code_version_check",
-        "no-code-version-check",
-        "code_binary",
-        "code-binary",
-        "download_dir",
-        "download-dir",
-        "yes",
-    ]:
-        val = parsed.get(k)
-        if val is not None:
-            config[k] = val
+    # Copy flag defaults, normalizing hyphenated keys to snake_case and
+    # validating types. Warn on unknown keys so typos don't silently no-op.
+    for key, val in parsed.items():
+        if key in ("skip_versions", "ignore", "ignore_extensions"):
+            continue
+        norm_key = key.replace("-", "_")
+        if norm_key not in CONFIG_OPTION_TYPES:
+            print(
+                f"{Colors.YELLOW}Warning: Unknown option '{key}' in config file '{config_path}'.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            config[norm_key] = coerce_config_value(val, CONFIG_OPTION_TYPES[norm_key])
+        except ValueError as e:
+            print(
+                f"{Colors.YELLOW}Warning: Invalid value for '{key}' in config file '{config_path}': {e}. Ignoring.{Colors.ENDC}",
+                file=sys.stderr,
+            )
 
     return config
 
@@ -1144,13 +1171,10 @@ def print_updates_table(updates):
         )
 
 
-def get_config_val(config, key, default=None):
-    # Try underscore
-    val = config.get(key.replace("-", "_"))
-    if val is not None:
-        return val
-    # Try hyphen
-    val = config.get(key.replace("_", "-"))
+def resolve_option(args_val, config, key, default):
+    if args_val is not None:
+        return args_val
+    val = config.get(key)
     if val is not None:
         return val
     return default
@@ -1158,7 +1182,8 @@ def get_config_val(config, key, default=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check, download, and install VS Code extension updates."
+        description="Check, download, and install VS Code extension updates.",
+        epilog="Defaults for all options can be set in ~/.config/code_update_extensions/config.toml; command line flags override them.",
     )
     parser.add_argument(
         "-p",
@@ -1168,11 +1193,25 @@ def main():
         help="Include pre-release versions in update check",
     )
     parser.add_argument(
+        "--no-include-prerelease",
+        dest="include_prerelease",
+        action="store_false",
+        default=None,
+        help="Exclude pre-release versions (overrides config file)",
+    )
+    parser.add_argument(
         "-n",
         "--no-code-version-check",
         action="store_true",
         default=None,
         help="Disable VS Code version compatibility check",
+    )
+    parser.add_argument(
+        "--code-version-check",
+        dest="no_code_version_check",
+        action="store_false",
+        default=None,
+        help="Enable VS Code version compatibility check (overrides config file)",
     )
     parser.add_argument(
         "-b",
@@ -1196,6 +1235,13 @@ def main():
         help="Automatically download and install all updates without prompting (useful for non-interactive environments)",
     )
     parser.add_argument(
+        "--no-yes",
+        dest="yes",
+        action="store_false",
+        default=None,
+        help="Prompt before installing updates (overrides 'yes = true' in config file)",
+    )
+    parser.add_argument(
         "-a",
         "--min-release-age",
         default=None,
@@ -1209,36 +1255,22 @@ def main():
     config = load_config()
 
     # Resolve parameters (command line overrides config overrides default)
-    include_prerelease = (
-        args.include_prerelease
-        if args.include_prerelease is not None
-        else get_config_val(config, "include_prerelease", False)
+    include_prerelease = resolve_option(
+        args.include_prerelease, config, "include_prerelease", False
     )
-    no_code_version_check = (
-        args.no_code_version_check
-        if args.no_code_version_check is not None
-        else get_config_val(config, "no_code_version_check", False)
+    no_code_version_check = resolve_option(
+        args.no_code_version_check, config, "no_code_version_check", False
     )
-    code_binary_val = (
-        args.code_binary
-        if args.code_binary is not None
-        else get_config_val(config, "code_binary", "code")
-    )
-    yes = args.yes if args.yes is not None else get_config_val(config, "yes", False)
-    min_release_age_str = (
-        args.min_release_age
-        if args.min_release_age is not None
-        else get_config_val(config, "min_release_age", "24h")
+    code_binary_val = resolve_option(args.code_binary, config, "code_binary", "code")
+    yes = resolve_option(args.yes, config, "yes", False)
+    min_release_age_str = resolve_option(
+        args.min_release_age, config, "min_release_age", "24h"
     )
 
-    download_dir_is_temp = (
-        args.download_dir is None and get_config_val(config, "download_dir") is None
-    )
-    download_dir = (
-        args.download_dir
-        if args.download_dir is not None
-        else get_config_val(config, "download_dir", None)
-    )
+    download_dir = resolve_option(args.download_dir, config, "download_dir", None)
+    if download_dir is not None:
+        download_dir = os.path.expanduser(download_dir)
+    download_dir_is_temp = download_dir is None
 
     try:
         min_release_age = parse_age_threshold(min_release_age_str)
