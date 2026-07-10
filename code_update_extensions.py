@@ -494,72 +494,73 @@ def check_updates(
                 compatible_versions.sort(
                     key=lambda x: parse_version(x["version"]), reverse=True
                 )
-                latest_ver_obj = compatible_versions[0]
-                latest_version = latest_ver_obj["version"]
-
-                # Check if it's newer than installed
-                if parse_version(latest_version) > parse_version(installed_ver):
-                    # Find the latest eligible version
-                    eligible_ver_obj = None
-                    for ver_obj in compatible_versions:
-                        if min_release_age and min_release_age > datetime.timedelta(0):
-                            last_updated = ver_obj.get("lastUpdated")
-                            if last_updated:
-                                try:
-                                    cleaned_ts = last_updated
-                                    if cleaned_ts.endswith("Z"):
-                                        cleaned_ts = cleaned_ts[:-1] + "+00:00"
-                                    release_dt = datetime.datetime.fromisoformat(
-                                        cleaned_ts
-                                    )
-                                    now = datetime.datetime.now(datetime.timezone.utc)
-                                    if now - release_dt < min_release_age:
-                                        continue
-                                except Exception:
-                                    pass
-                        eligible_ver_obj = ver_obj
-                        break
-
-                    last_updated = latest_ver_obj.get("lastUpdated", "")
-                    latest_release_date = (
-                        last_updated[:10] if len(last_updated) >= 10 else last_updated
-                    )
-
-                    eligible_version = None
-                    eligible_release_date = ""
-                    eligible_platform = "universal"
-
-                    if eligible_ver_obj:
-                        el_ver = eligible_ver_obj["version"]
-                        if parse_version(el_ver) > parse_version(installed_ver):
-                            eligible_version = el_ver
-                            el_updated = eligible_ver_obj.get("lastUpdated", "")
-                            eligible_release_date = (
-                                el_updated[:10] if len(el_updated) >= 10 else el_updated
-                            )
-                            eligible_platform = (
-                                eligible_ver_obj.get("targetPlatform") or "universal"
-                            )
-
-                    updates.append(
-                        {
-                            "id": full_id,
-                            "publisher": pub_name,
-                            "name": ext_name,
-                            "installed": installed_ver,
-                            "latest": latest_version,
-                            "latest_release_date": latest_release_date,
-                            "latest_platform": latest_ver_obj.get("targetPlatform")
-                            or "universal",
-                            "eligible": eligible_version,
-                            "eligible_release_date": eligible_release_date,
-                            "eligible_platform": eligible_platform,
-                        }
-                    )
             except Exception as ex:
                 print(
                     f"{Colors.RED}Warning: Error parsing versions for {full_id}: {ex}{Colors.ENDC}",
                     file=sys.stderr,
+                )
+                continue
+            latest_ver_obj = compatible_versions[0]
+            latest_version = latest_ver_obj["version"]
+
+            # Check if it's newer than installed
+            if parse_version(latest_version) > parse_version(installed_ver):
+                # Find the latest eligible version
+                eligible_ver_obj = None
+                for ver_obj in compatible_versions:
+                    if min_release_age and min_release_age > datetime.timedelta(0):
+                        last_updated = ver_obj.get("lastUpdated")
+                        if last_updated:
+                            try:
+                                cleaned_ts = last_updated
+                                if cleaned_ts.endswith("Z"):
+                                    cleaned_ts = cleaned_ts[:-1] + "+00:00"
+                                release_dt = datetime.datetime.fromisoformat(
+                                    cleaned_ts
+                                )
+                                now = datetime.datetime.now(datetime.timezone.utc)
+                                if now - release_dt < min_release_age:
+                                    continue
+                            except Exception:
+                                pass
+                    eligible_ver_obj = ver_obj
+                    break
+
+                last_updated = latest_ver_obj.get("lastUpdated", "")
+                latest_release_date = (
+                    last_updated[:10] if len(last_updated) >= 10 else last_updated
+                )
+
+                eligible_version = None
+                eligible_release_date = ""
+                eligible_platform = "universal"
+
+                if eligible_ver_obj:
+                    el_ver = eligible_ver_obj["version"]
+                    if parse_version(el_ver) > parse_version(installed_ver):
+                        eligible_version = el_ver
+                        el_updated = eligible_ver_obj.get("lastUpdated", "")
+                        eligible_release_date = (
+                            el_updated[:10] if len(el_updated) >= 10 else el_updated
+                        )
+                        eligible_platform = (
+                            eligible_ver_obj.get("targetPlatform") or "universal"
+                        )
+
+                updates.append(
+                    {
+                        "id": full_id,
+                        "publisher": pub_name,
+                        "name": ext_name,
+                        "installed": installed_ver,
+                        "latest": latest_version,
+                        "latest_release_date": latest_release_date,
+                        "latest_platform": latest_ver_obj.get("targetPlatform")
+                        or "universal",
+                        "eligible": eligible_version,
+                        "eligible_release_date": eligible_release_date,
+                        "eligible_platform": eligible_platform,
+                    }
                 )
 
     return updates
