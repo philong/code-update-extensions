@@ -260,13 +260,25 @@ def parse_age_threshold(age_str):
     return datetime.timedelta(0)
 
 
+def get_cache_dir():
+    # Per-user cache dir: /tmp is world-writable with predictable filenames,
+    # which would let another local user poison cached marketplace responses.
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    cache_dir = os.path.join(base, "code_update_extensions")
+    try:
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+    except Exception:
+        return tempfile.gettempdir()
+    return cache_dir
+
+
 def cleanup_stale_cache():
     try:
-        temp_dir = tempfile.gettempdir()
+        cache_dir = get_cache_dir()
         now = time.time()
-        for filename in os.listdir(temp_dir):
+        for filename in os.listdir(cache_dir):
             if filename.startswith("vscode_ext_cache_") and filename.endswith(".json"):
-                filepath = os.path.join(temp_dir, filename)
+                filepath = os.path.join(cache_dir, filename)
                 try:
                     if now - os.path.getmtime(filepath) > 3600:
                         os.remove(filepath)
@@ -327,7 +339,7 @@ def check_updates(
             json.dumps(payload, sort_keys=True).encode("utf-8")
         ).hexdigest()
         cache_file = os.path.join(
-            tempfile.gettempdir(), f"vscode_ext_cache_{payload_hash}.json"
+            get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json"
         )
 
         resp_data = None
