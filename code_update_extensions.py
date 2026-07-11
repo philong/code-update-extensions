@@ -1338,18 +1338,26 @@ def main():
             print(f"{Colors.GREEN}{Colors.BOLD}Updates available:{Colors.ENDC}")
             print_updates_table(updates)
             print()
-            download_dir_resolved = (
-                download_dir if download_dir is not None else tempfile.gettempdir()
-            )
-            print(
-                f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}"
-            )
-            download_updates(updates, download_dir_resolved)
-            print()
-            print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
-            install_updates(updates, download_dir_resolved, code_binary=code_binary)
-            if download_dir_is_temp:
-                cleanup_temp_files(updates, download_dir_resolved)
+            eligible_updates = [u for u in updates if u["eligible"]]
+            if not eligible_updates:
+                print(
+                    f"{Colors.YELLOW}All available updates are held back by the minimum release age; nothing to install.{Colors.ENDC}"
+                )
+            else:
+                download_dir_resolved = (
+                    download_dir if download_dir is not None else tempfile.gettempdir()
+                )
+                print(
+                    f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}"
+                )
+                download_updates(eligible_updates, download_dir_resolved)
+                print()
+                print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
+                install_updates(
+                    eligible_updates, download_dir_resolved, code_binary=code_binary
+                )
+                if download_dir_is_temp:
+                    cleanup_temp_files(eligible_updates, download_dir_resolved)
         elif HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty():
             selected_updates = select_updates(updates)
             if selected_updates:
