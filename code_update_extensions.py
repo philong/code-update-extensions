@@ -663,7 +663,6 @@ def download_updates(updates, download_dir):
 
                 with open(filepath, "wb") as f:
                     f.write(body)
-            print(f"  {Colors.GREEN}✓{Colors.ENDC} Saved to {filepath}")
         except Exception as e:
             print(
                 f"  {Colors.RED}✗ Failed to download: {e}{Colors.ENDC}", file=sys.stderr
@@ -716,7 +715,6 @@ def get_key():
 
 
 def cleanup_temp_files(updates, download_dir):
-    print(f"\n{Colors.BLUE}Cleaning up temporary files...{Colors.ENDC}")
     for update in updates:
         if not update["eligible"]:
             continue
