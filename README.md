@@ -105,3 +105,10 @@ Include pre-releases but require updates to be at least 3 days old:
 ```bash
 ./code_update_extensions --code-binary codium
 ```
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later) - see the [LICENSE](LICENSE) file for details.
+
