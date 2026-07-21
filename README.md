@@ -49,12 +49,12 @@ Boolean flags set in the configuration file can be overridden back from the comm
 
 ## Configuration File
 
-You can set defaults for all command line flags and configure skip rules via a TOML configuration file at `~/.config/code_update_extensions/config.toml`. Options specified via command line arguments will override those in the configuration file. Unknown keys or values with the wrong type produce a warning and are ignored.
+You can set defaults for command line flags and configure per-extension rules (`ignore`, `min-release-age`, `skip-versions`) via a TOML configuration file at `~/.config/code_update_extensions/config.toml`. Options specified via command line arguments will override those in the configuration file. Unknown keys or values with the wrong type produce a warning and are ignored.
 
 ### Example Configuration
 
 ```toml
-# Defaults for command line flags (hyphenated or snake_case keys are both accepted)
+# Global defaults for command line flags (hyphenated or snake_case keys are both accepted)
 min-release-age = "12h"        # -a, --min-release-age (e.g., 24h, 3d, 30m, 0)
 include-prerelease = false     # -p, --include-prerelease
 no-code-version-check = false  # -n, --no-code-version-check
@@ -62,15 +62,17 @@ code-binary = "code"           # -b, --code-binary (supports flags and ~ expansi
 download-dir = "~/Downloads"   # -d, --download-dir
 yes = false                    # -y, --yes
 
-# Extensions to ignore entirely during updates (alias: ignore_extensions)
-ignore = [
-    "ms-python.python"
-]
+# Per-extension configuration tables
+[extensions."ms-python.python"]
+ignore = true                  # Ignore this extension entirely during update checks
 
-# Specific versions of extensions to skip (ulterior versions will still be installed)
-[skip_versions]
-"vscjava.vscode-gradle" = "3.17.3"
-"golang.go" = ["0.39.0", "0.39.1"]
+[extensions."vscjava.vscode-gradle"]
+min-release-age = "0"          # Override min-release-age (e.g. 0 to disable age buffer)
+skip-versions = "3.17.3"       # Specific version(s) to skip (string or array of strings)
+
+[extensions."golang.go"]
+min-release-age = "3d"         # Require updates for this extension to be at least 3 days old
+skip-versions = ["0.39.0", "0.39.1"]
 ```
 
 ---

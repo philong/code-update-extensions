@@ -335,14 +335,17 @@ def check_updates(
     vscode_version=None,
     exclude_prerelease=True,
     min_release_age=None,
-    skip_versions=None,
-    ignore_extensions=None,
+    extensions_config=None,
+    cli_min_release_age_override=False,
 ):
     cleanup_stale_cache()
     ext_ids = list(installed_exts.keys())
-    if ignore_extensions:
-        ignored_set = {x.lower() for x in ignore_extensions}
-        ext_ids = [eid for eid in ext_ids if eid not in ignored_set]
+    if extensions_config:
+        ext_ids = [
+            eid
+            for eid in ext_ids
+            if not extensions_config.get(eid.lower(), {}).get("ignore", False)
+        ]
     batch_size = 50
     updates = []
 
@@ -501,14 +504,16 @@ def check_updates(
             if not installed_ver:
                 continue
 
+            ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
+            skipped_versions = ext_cfg.get("skip_versions", [])
+
             # Filter compatible versions
             compatible_versions = []
             for ver_obj in ext.get("versions", []):
                 version_str = ver_obj.get("version")
                 # Exclude skipped versions from config
-                if skip_versions and full_id in skip_versions:
-                    if version_str in skip_versions[full_id]:
-                        continue
+                if skipped_versions and version_str in skipped_versions:
+                    continue
                 # Exclude pre-releases if requested
                 if exclude_prerelease and is_prerelease(ver_obj):
                     continue
@@ -544,12 +549,23 @@ def check_updates(
             latest_ver_obj = compatible_versions[0]
             latest_version = latest_ver_obj["version"]
 
+            # Determine effective min_release_age for this extension
+            eff_min_age = min_release_age
+            if not cli_min_release_age_override and "min_release_age" in ext_cfg:
+                try:
+                    eff_min_age = parse_age_threshold(ext_cfg["min_release_age"])
+                except ValueError as e:
+                    print(
+                        f"{Colors.YELLOW}Warning: Invalid min-release-age for extension '{full_id}': {e}. Using default.{Colors.ENDC}",
+                        file=sys.stderr,
+                    )
+
             # Check if it's newer than installed
             if parse_version(latest_version) > parse_version(installed_ver):
                 # Find the latest eligible version
                 eligible_ver_obj = None
                 for ver_obj in compatible_versions:
-                    if min_release_age and min_release_age > datetime.timedelta(0):
+                    if eff_min_age and eff_min_age > datetime.timedelta(0):
                         last_updated = ver_obj.get("lastUpdated")
                         if last_updated:
                             try:
@@ -558,7 +574,7 @@ def check_updates(
                                     cleaned_ts = cleaned_ts[:-1] + "+00:00"
                                 release_dt = datetime.datetime.fromisoformat(cleaned_ts)
                                 now = datetime.datetime.now(datetime.timezone.utc)
-                                if now - release_dt < min_release_age:
+                                if now - release_dt < eff_min_age:
                                     continue
                             except Exception:
                                 pass
@@ -1043,9 +1059,22 @@ def parse_toml_fallback(content):
             continue
 
         if line.startswith("[") and line.endswith("]"):
-            current_section = line[1:-1].strip()
-            if current_section not in data:
-                data[current_section] = {}
+            sec = line[1:-1].strip()
+            if "." in sec:
+                parts = [p.strip().strip('"').strip("'") for p in sec.split(".", 1)]
+                top_sec, sub_sec = parts[0], parts[1]
+                if top_sec not in data or not isinstance(data[top_sec], dict):
+                    data[top_sec] = {}
+                if sub_sec not in data[top_sec] or not isinstance(
+                    data[top_sec][sub_sec], dict
+                ):
+                    data[top_sec][sub_sec] = {}
+                current_section = (top_sec, sub_sec)
+            else:
+                sec_name = sec.strip('"').strip("'")
+                if sec_name not in data or not isinstance(data[sec_name], dict):
+                    data[sec_name] = {}
+                current_section = sec_name
             continue
 
         if "=" in line:
@@ -1080,8 +1109,12 @@ def parse_toml_fallback(content):
             else:
                 parsed_val = val.strip('"').strip("'")
 
-            if current_section:
-                if current_section not in data:
+            if isinstance(current_section, tuple):
+                data[current_section[0]][current_section[1]][key] = parsed_val
+            elif current_section:
+                if current_section not in data or not isinstance(
+                    data[current_section], dict
+                ):
                     data[current_section] = {}
                 data[current_section][key] = parsed_val
             else:
@@ -1116,7 +1149,7 @@ def coerce_config_value(val, expected_type):
 
 def load_config():
     config_path = os.path.expanduser("~/.config/code_update_extensions/config.toml")
-    config = {"skip_versions": {}, "ignore": []}
+    config = {"extensions": {}}
     if not os.path.exists(config_path):
         return config
 
@@ -1148,31 +1181,49 @@ def load_config():
         )
         return config
 
-    # Parse [skip_versions]
-    skip_versions = parsed.get("skip_versions", {})
-    if isinstance(skip_versions, dict):
-        for ext_id, val in skip_versions.items():
-            ext_id_lower = ext_id.lower()
-            if isinstance(val, str):
-                config["skip_versions"][ext_id_lower] = [val]
-            elif isinstance(val, list):
-                config["skip_versions"][ext_id_lower] = [str(v) for v in val]
-            else:
-                config["skip_versions"][ext_id_lower] = [str(val)]
+    # Parse [extensions."<ext_id>"] or [extension."<ext_id>"]
+    ext_sections = {}
+    if "extensions" in parsed and isinstance(parsed["extensions"], dict):
+        ext_sections.update(parsed["extensions"])
+    if "extension" in parsed and isinstance(parsed["extension"], dict):
+        ext_sections.update(parsed["extension"])
 
-    # Parse ignore
-    ignore = parsed.get("ignore", parsed.get("ignore_extensions", []))
-    if not isinstance(ignore, list):
-        if isinstance(ignore, str):
-            ignore = [ignore]
-        else:
-            ignore = []
-    config["ignore"] = [str(eid).strip().lower() for eid in ignore]
+    for ext_id, ext_data in ext_sections.items():
+        if not isinstance(ext_data, dict):
+            continue
+        ext_id_lower = str(ext_id).strip().lower()
+        norm_ext_cfg = {}
+
+        # ignore: bool
+        if "ignore" in ext_data:
+            val = ext_data["ignore"]
+            if isinstance(val, bool):
+                norm_ext_cfg["ignore"] = val
+            elif isinstance(val, str) and val.strip().lower() in ("true", "false"):
+                norm_ext_cfg["ignore"] = val.strip().lower() == "true"
+
+        # min_release_age: str
+        for age_key in ("min_release_age", "min-release-age"):
+            if age_key in ext_data:
+                norm_ext_cfg["min_release_age"] = str(ext_data[age_key])
+
+        # skip_versions: list of str
+        for skip_key in ("skip_versions", "skip-versions"):
+            if skip_key in ext_data:
+                val = ext_data[skip_key]
+                if isinstance(val, str):
+                    norm_ext_cfg["skip_versions"] = [val]
+                elif isinstance(val, list):
+                    norm_ext_cfg["skip_versions"] = [str(v) for v in val]
+                else:
+                    norm_ext_cfg["skip_versions"] = [str(val)]
+
+        config["extensions"][ext_id_lower] = norm_ext_cfg
 
     # Copy flag defaults, normalizing hyphenated keys to snake_case and
     # validating types. Warn on unknown keys so typos don't silently no-op.
     for key, val in parsed.items():
-        if key in ("skip_versions", "ignore", "ignore_extensions"):
+        if key in ("extensions", "extension"):
             continue
         norm_key = key.replace("-", "_")
         if norm_key not in CONFIG_OPTION_TYPES:
@@ -1361,16 +1412,16 @@ def main():
         f"{Colors.BLUE}Checking updates on VS Code Marketplace (including pre-releases: {include_prerelease})...{Colors.ENDC}"
     )
 
-    skip_versions = config.get("skip_versions", {})
-    ignore_extensions = config.get("ignore", [])
+    cli_min_release_age_override = args.min_release_age is not None
+    extensions_config = config.get("extensions", {})
     updates = check_updates(
         installed_exts,
         target_platform,
         vscode_version=vscode_version,
         exclude_prerelease=not include_prerelease,
         min_release_age=min_release_age,
-        skip_versions=skip_versions,
-        ignore_extensions=ignore_extensions,
+        extensions_config=extensions_config,
+        cli_min_release_age_override=cli_min_release_age_override,
     )
 
     print()
