@@ -13,6 +13,7 @@ import shutil
 import datetime
 import time
 import hashlib
+import shlex
 
 try:
     import tty
@@ -104,6 +105,27 @@ def parse_version(v_str):
     return (comparable(parsed_ints), is_release, comparable(prerelease_parts))
 
 
+def parse_code_binary(code_binary):
+    if isinstance(code_binary, (list, tuple)):
+        tokens = [str(x) for x in code_binary]
+    elif isinstance(code_binary, str):
+        try:
+            tokens = shlex.split(code_binary)
+        except Exception:
+            tokens = [code_binary]
+    elif code_binary:
+        tokens = [str(code_binary)]
+    else:
+        tokens = ["code"]
+
+    if not tokens:
+        tokens = ["code"]
+
+    executable = os.path.expanduser(tokens[0])
+    resolved_exec = shutil.which(executable) or executable
+    return [resolved_exec] + tokens[1:]
+
+
 def run_code_cmd(args, retries=3, delay=1.0):
     for attempt in range(retries + 1):
         try:
@@ -121,12 +143,15 @@ def run_code_cmd(args, retries=3, delay=1.0):
 
 
 def get_installed_extensions(code_binary="code"):
+    binary_cmd = parse_code_binary(code_binary)
+    full_cmd = binary_cmd + ["--list-extensions", "--show-versions"]
     try:
-        result = run_code_cmd([code_binary, "--list-extensions", "--show-versions"])
+        result = run_code_cmd(full_cmd)
         output = result.stdout
     except Exception as e:
+        cmd_str = " ".join(full_cmd)
         print(
-            f"{Colors.RED}Error running '{code_binary} --list-extensions --show-versions': {e}{Colors.ENDC}",
+            f"{Colors.RED}Error running '{cmd_str}': {e}{Colors.ENDC}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -154,8 +179,10 @@ def is_prerelease(version_obj):
 
 
 def get_vscode_version(code_binary="code"):
+    binary_cmd = parse_code_binary(code_binary)
+    full_cmd = binary_cmd + ["--version"]
     try:
-        result = run_code_cmd([code_binary, "--version"])
+        result = run_code_cmd(full_cmd)
         lines = result.stdout.strip().splitlines()
         if lines:
             return lines[0].strip()
@@ -884,6 +911,7 @@ def select_updates(updates):
 
 
 def install_updates(updates, download_dir, code_binary="code"):
+    binary_cmd = parse_code_binary(code_binary)
     for update in updates:
         if not update["eligible"]:
             continue
@@ -903,7 +931,7 @@ def install_updates(updates, download_dir, code_binary="code"):
         try:
             # No retries: install failures are deterministic (bad VSIX, engine
             # mismatch), so retrying just repeats the same error with delays.
-            run_code_cmd([code_binary, "--install-extension", filepath], retries=0)
+            run_code_cmd(binary_cmd + ["--install-extension", filepath], retries=0)
             print(f"  {Colors.GREEN}✓{Colors.ENDC} Installed successfully.")
         except subprocess.CalledProcessError as e:
             print(
@@ -1276,8 +1304,7 @@ def main():
         print(f"{Colors.RED}Error: {e}{Colors.ENDC}", file=sys.stderr)
         sys.exit(1)
 
-    code_binary_path = os.path.expanduser(code_binary_val)
-    code_binary = shutil.which(code_binary_path) or code_binary_path
+    code_binary = parse_code_binary(code_binary_val)
 
     # Determine VS Code version to use for compatibility checks
     vscode_version = None
