@@ -30,6 +30,7 @@ import datetime
 import time
 import hashlib
 import shlex
+from functools import lru_cache
 
 try:
     import tty
@@ -48,7 +49,7 @@ def get_vsix_download_url(
     ver_obj, pub_name, ext_name, version, platform, service_url=DEFAULT_SERVICE_URL
 ):
     if ver_obj and isinstance(ver_obj, dict):
-        for f in ver_obj.get("files", []):
+        for f in ver_obj.get("files") or []:
             asset_type = f.get("assetType", "")
             if asset_type in (
                 "Microsoft.VisualStudio.Services.VSIXPackage",
@@ -115,6 +116,7 @@ def get_local_target_platform():
     return "universal"
 
 
+@lru_cache(maxsize=4096)
 def parse_version(v_str):
     parts = v_str.split("-")
     main_parts = parts[0].split(".")
@@ -252,6 +254,7 @@ def semver_parts(v_str):
         return 0, 0, 0
 
 
+@lru_cache(maxsize=4096)
 def is_engine_compatible(vscode_version_str, engine_constraint):
     if not vscode_version_str or not engine_constraint:
         return True
@@ -406,7 +409,7 @@ def check_updates(
                 }
             ],
             "assetTypes": [],
-            "flags": 411,
+            "flags": 17,
         }
 
         req_data = json.dumps(payload).encode("utf-8")
@@ -542,6 +545,7 @@ def check_updates(
             if not installed_ver:
                 continue
 
+            parsed_installed = parse_version(installed_ver)
             ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
             skipped_versions = ext_cfg.get("skip_versions", [])
 
@@ -549,6 +553,12 @@ def check_updates(
             compatible_versions = []
             for ver_obj in ext.get("versions", []):
                 version_str = ver_obj.get("version")
+                if not version_str:
+                    continue
+                # Marketplace API returns versions in descending order (newest first).
+                # Once version <= installed_ver, no subsequent version can be a newer update.
+                if parse_version(version_str) <= parsed_installed:
+                    break
                 # Exclude skipped versions from config
                 if skipped_versions and version_str in skipped_versions:
                     continue
