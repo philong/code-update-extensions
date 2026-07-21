@@ -40,6 +40,38 @@ try:
 except ImportError:
     HAS_TTY = False
 
+DEFAULT_SERVICE_URL = "https://marketplace.visualstudio.com/_apis/public/gallery"
+OPEN_VSX_SERVICE_URL = "https://open-vsx.org/vscode/gallery"
+
+
+def get_vsix_download_url(
+    ver_obj, pub_name, ext_name, version, platform, service_url=DEFAULT_SERVICE_URL
+):
+    if ver_obj and isinstance(ver_obj, dict):
+        for f in ver_obj.get("files", []):
+            asset_type = f.get("assetType", "")
+            if asset_type in (
+                "Microsoft.VisualStudio.Services.VSIXPackage",
+                "Microsoft.VisualStudio.Code.VSIXPackage",
+            ) and f.get("source"):
+                url = f["source"]
+                if (
+                    platform
+                    and platform != "universal"
+                    and "targetPlatform=" not in url
+                ):
+                    sep = "&" if "?" in url else "?"
+                    url += f"{sep}targetPlatform={platform}"
+                return url
+
+    base_url = service_url.rstrip("/")
+    url = (
+        f"{base_url}/publishers/{pub_name}/vsextensions/{ext_name}/{version}/vspackage"
+    )
+    if platform and platform != "universal":
+        url += f"?targetPlatform={platform}"
+    return url
+
 
 class Colors:
     BLUE = "\033[94m"
@@ -337,6 +369,7 @@ def check_updates(
     min_release_age=None,
     extensions_config=None,
     cli_min_release_age_override=False,
+    service_url=DEFAULT_SERVICE_URL,
 ):
     cleanup_stale_cache()
     ext_ids = list(installed_exts.keys())
@@ -379,8 +412,9 @@ def check_updates(
         req_data = json.dumps(payload).encode("utf-8")
 
         # Check cache
+        cache_key_data = {"service_url": service_url, "payload": payload}
         payload_hash = hashlib.sha256(
-            json.dumps(payload, sort_keys=True).encode("utf-8")
+            json.dumps(cache_key_data, sort_keys=True).encode("utf-8")
         ).hexdigest()
         cache_file = os.path.join(
             get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json"
@@ -396,8 +430,12 @@ def check_updates(
                 pass
 
         if resp_data is None:
+            query_endpoint = f"{service_url.rstrip('/')}/extensionquery"
+            if "api-version=" not in query_endpoint:
+                query_endpoint += "?api-version=7.2-preview.1"
+
             req = urllib.request.Request(
-                "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery?api-version=7.2-preview.1",
+                query_endpoint,
                 data=req_data,
                 headers={
                     "Content-Type": "application/json",
@@ -602,6 +640,27 @@ def check_updates(
                             eligible_ver_obj.get("targetPlatform") or "universal"
                         )
 
+                latest_download_url = get_vsix_download_url(
+                    latest_ver_obj,
+                    pub_name,
+                    ext_name,
+                    latest_version,
+                    latest_ver_obj.get("targetPlatform"),
+                    service_url,
+                )
+                eligible_download_url = (
+                    get_vsix_download_url(
+                        eligible_ver_obj,
+                        pub_name,
+                        ext_name,
+                        eligible_version,
+                        eligible_platform,
+                        service_url,
+                    )
+                    if eligible_ver_obj
+                    else None
+                )
+
                 updates.append(
                     {
                         "id": full_id,
@@ -612,9 +671,11 @@ def check_updates(
                         "latest_release_date": latest_release_date,
                         "latest_platform": latest_ver_obj.get("targetPlatform")
                         or "universal",
+                        "latest_download_url": latest_download_url,
                         "eligible": eligible_version,
                         "eligible_release_date": eligible_release_date,
                         "eligible_platform": eligible_platform,
+                        "eligible_download_url": eligible_download_url,
                     }
                 )
 
@@ -634,7 +695,7 @@ def vsix_filename(update):
     return filename + ".vsix"
 
 
-def download_updates(updates, download_dir):
+def download_updates(updates, download_dir, service_url=DEFAULT_SERVICE_URL):
     os.makedirs(download_dir, exist_ok=True)
     show_progress = sys.stdout.isatty()
     for update in updates:
@@ -645,9 +706,11 @@ def download_updates(updates, download_dir):
         version = update["eligible"]
         platform = update["eligible_platform"]
 
-        url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{pub_name}/vsextensions/{ext_name}/{version}/vspackage"
-        if platform and platform != "universal":
-            url += f"?targetPlatform={platform}"
+        url = update.get("eligible_download_url")
+        if not url:
+            url = get_vsix_download_url(
+                {}, pub_name, ext_name, version, platform, service_url
+            )
 
         filepath = os.path.join(download_dir, vsix_filename(update))
 
@@ -928,6 +991,7 @@ def select_updates(updates):
                     update["eligible"] = update["latest"]
                     update["eligible_platform"] = update["latest_platform"]
                     update["eligible_release_date"] = update["latest_release_date"]
+                    update["eligible_download_url"] = update.get("latest_download_url")
                 chosen.append(update)
         return chosen
 
@@ -1130,6 +1194,10 @@ CONFIG_OPTION_TYPES = {
     "code_binary": str,
     "download_dir": str,
     "min_release_age": str,
+    "service_url": str,
+    "gallery_url": str,
+    "open_vsx": bool,
+    "use_open_vsx": bool,
 }
 
 
@@ -1340,6 +1408,20 @@ def main():
         default=None,
         help="Minimum age of a release to be considered for update (e.g. 24h, 1d) to mitigate supply chain attacks (default: 24h)",
     )
+    parser.add_argument(
+        "-s",
+        "--service-url",
+        "--gallery-url",
+        dest="service_url",
+        default=None,
+        help="VS Code Extension Gallery service API URL (default: https://marketplace.visualstudio.com/_apis/public/gallery)",
+    )
+    parser.add_argument(
+        "--open-vsx",
+        action="store_true",
+        default=None,
+        help="Use Open VSX Registry (https://open-vsx.org/vscode/gallery) instead of official VS Code Marketplace",
+    )
     args = parser.parse_args()
 
     enable_colors()
@@ -1359,6 +1441,24 @@ def main():
     min_release_age_str = resolve_option(
         args.min_release_age, config, "min_release_age", "24h"
     )
+
+    open_vsx = resolve_option(
+        args.open_vsx, config, "open_vsx", False
+    ) or resolve_option(None, config, "use_open_vsx", False)
+
+    if open_vsx:
+        service_url = OPEN_VSX_SERVICE_URL
+    else:
+        service_url_opt = resolve_option(args.service_url, config, "service_url", None)
+        if not service_url_opt:
+            service_url_opt = resolve_option(
+                None, config, "gallery_url", DEFAULT_SERVICE_URL
+            )
+
+        if service_url_opt.lower().strip() in ("open-vsx", "openvsx", "open_vsx"):
+            service_url = OPEN_VSX_SERVICE_URL
+        else:
+            service_url = service_url_opt.rstrip("/")
 
     download_dir = resolve_option(args.download_dir, config, "download_dir", None)
     if download_dir is not None:
@@ -1380,9 +1480,20 @@ def main():
 
     target_platform = get_local_target_platform()
 
+    if service_url == OPEN_VSX_SERVICE_URL:
+        gallery_name = "Open VSX Registry"
+    elif service_url == DEFAULT_SERVICE_URL:
+        gallery_name = "VS Code Marketplace"
+    else:
+        gallery_name = service_url
+
     print(
         f"{Colors.BLUE}Local Target Platform:{Colors.ENDC} {Colors.BOLD}{target_platform}{Colors.ENDC}"
     )
+    if service_url != DEFAULT_SERVICE_URL:
+        print(
+            f"{Colors.BLUE}Extension Gallery:{Colors.ENDC} {Colors.BOLD}{gallery_name}{Colors.ENDC}"
+        )
     if min_release_age > datetime.timedelta(0):
         print(
             f"{Colors.BLUE}Min Release Age:{Colors.ENDC} {Colors.BOLD}{min_release_age_str}{Colors.ENDC}"
@@ -1409,7 +1520,7 @@ def main():
 
     print(f"Found {len(installed_exts)} extensions installed.")
     print(
-        f"{Colors.BLUE}Checking updates on VS Code Marketplace (including pre-releases: {include_prerelease})...{Colors.ENDC}"
+        f"{Colors.BLUE}Checking updates on {gallery_name} (including pre-releases: {include_prerelease})...{Colors.ENDC}"
     )
 
     cli_min_release_age_override = args.min_release_age is not None
@@ -1422,6 +1533,7 @@ def main():
         min_release_age=min_release_age,
         extensions_config=extensions_config,
         cli_min_release_age_override=cli_min_release_age_override,
+        service_url=service_url,
     )
 
     print()
@@ -1442,7 +1554,9 @@ def main():
                 print(
                     f"{Colors.BLUE}Automatically downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}"
                 )
-                download_updates(eligible_updates, download_dir_resolved)
+                download_updates(
+                    eligible_updates, download_dir_resolved, service_url=service_url
+                )
                 print()
                 print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
                 install_updates(
@@ -1460,7 +1574,9 @@ def main():
                 print(
                     f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir_resolved}{Colors.ENDC}"
                 )
-                download_updates(selected_updates, download_dir_resolved)
+                download_updates(
+                    selected_updates, download_dir_resolved, service_url=service_url
+                )
                 print()
                 print(f"{Colors.BLUE}Installing updates...{Colors.ENDC}")
                 install_updates(
@@ -1479,7 +1595,7 @@ def main():
                 print(
                     f"{Colors.BLUE}Downloading updates to:{Colors.ENDC} {Colors.BOLD}{download_dir}{Colors.ENDC}"
                 )
-                download_updates(updates, download_dir)
+                download_updates(updates, download_dir, service_url=service_url)
     else:
         print(f"{Colors.GREEN}All extensions are up to date!{Colors.ENDC}")
 

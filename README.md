@@ -9,6 +9,7 @@ A Python script to check, download, and install VS Code extension updates direct
 - **Supply-Chain Security Mitigation**: Hold back updates that are too fresh (default `24h`) to ensure they have not been retracted or flag-analyzed.
 - **Auto Platform & Architecture Resolution**: Detects and downloads platform-specific `.vsix` packages (e.g. `linux-x64`, `darwin-arm64`, `win32-x64`).
 - **VS Code Version Compatibility Checks**: Automatically queries your installed VS Code version and verifies target extension requirements so you never install incompatible updates.
+- **Alternative VS Code Extension Registries & Open VSX**: Query updates from Open VSX or custom self-hosted VS Code Extension Galleries instead of the default Microsoft Marketplace.
 - **Alternative VS Code Forks Supported**: Works with alternative builds or forks (e.g. VSCodium, VS Code Insiders) by pointing the `--code-binary` argument to your target executable.
 
 ---
@@ -42,6 +43,8 @@ No external Python dependencies are required (uses standard library modules like
 | `--download-dir [path]` | `-d` | Download `.vsix` files to the specified directory. Defaults to system temporary directory if omitted, or current directory (`.`) if specified without a path. |
 | `--yes` | `-y` | Run non-interactively; automatically downloads and installs all updates. |
 | `--min-release-age <age>` | `-a` | Minimum release age (e.g., `24h`, `3d`, `30m`, `0`) to mitigate supply-chain risks (default: `24h`). Set to `0` to disable. |
+| `--open-vsx` | | Use the Open VSX Registry (`https://open-vsx.org/vscode/gallery`) instead of official VS Code Marketplace. |
+| `--service-url <url>` | `-s` | Custom VS Code Extension Gallery service URL (default: `https://marketplace.visualstudio.com/_apis/public/gallery`). |
 
 Boolean flags set in the configuration file can be overridden back from the command line with `--no-include-prerelease`, `--code-version-check`, and `--no-yes`.
 
@@ -61,6 +64,8 @@ no-code-version-check = false  # -n, --no-code-version-check
 code-binary = "code"           # -b, --code-binary (supports flags and ~ expansion, e.g. "codium --user-data-dir ~/.config/VSCodium")
 download-dir = "~/Downloads"   # -d, --download-dir
 yes = false                    # -y, --yes
+open-vsx = false               # Use Open VSX Registry (https://open-vsx.org/vscode/gallery)
+# service-url = "https://open-vsx.org/vscode/gallery" # Or specify a custom registry API URL
 
 # Per-extension configuration tables
 [extensions."ms-python.python"]
@@ -105,9 +110,9 @@ Include pre-releases but require updates to be at least 3 days old:
 ./code_update_extensions -p --min-release-age 3d
 ```
 
-### 4. Update VSCodium Extensions
+### 4. Update VSCodium Extensions via Open VSX
 ```bash
-./code_update_extensions --code-binary codium
+./code_update_extensions --code-binary codium --open-vsx
 ```
 
 ---
