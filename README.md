@@ -38,10 +38,10 @@ No external Python dependencies are required (uses standard library modules like
 | :--- | :--- | :--- |
 | `--include-prerelease` | `-p` | Include pre-release versions in the update check. |
 | `--no-code-version-check` | `-n` | Disable verification of VS Code host compatibility. |
-| `--code-binary <path>` | `-b` | Path to the VS Code binary or executable (default: `code`). |
-| `--download-dir <path>` | `-d` | Download `.vsix` files to the specified directory. Defaults to the system temporary directory. |
+| `--code-binary <path/cmd>` | `-b` | Path to the VS Code binary or executable, optionally with custom flags (default: `code`). Supports `~` expansion. |
+| `--download-dir [path]` | `-d` | Download `.vsix` files to the specified directory. Defaults to system temporary directory if omitted, or current directory (`.`) if specified without a path. |
 | `--yes` | `-y` | Run non-interactively; automatically downloads and installs all updates. |
-| `--min-release-age <age>` | `-a` | Minimum release age (e.g., `24h`, `3d`, `12h`) to mitigate supply-chain risks (default: `24h`). |
+| `--min-release-age <age>` | `-a` | Minimum release age (e.g., `24h`, `3d`, `30m`, `0`) to mitigate supply-chain risks (default: `24h`). Set to `0` to disable. |
 
 Boolean flags set in the configuration file can be overridden back from the command line with `--no-include-prerelease`, `--code-version-check`, and `--no-yes`.
 
@@ -55,14 +55,14 @@ You can set defaults for all command line flags and configure skip rules via a T
 
 ```toml
 # Defaults for command line flags (hyphenated or snake_case keys are both accepted)
-min-release-age = "12h"        # -a, --min-release-age
+min-release-age = "12h"        # -a, --min-release-age (e.g., 24h, 3d, 30m, 0)
 include-prerelease = false     # -p, --include-prerelease
 no-code-version-check = false  # -n, --no-code-version-check
-code-binary = "code"           # -b, --code-binary
+code-binary = "code"           # -b, --code-binary (supports flags and ~ expansion, e.g. "codium --user-data-dir ~/.config/VSCodium")
 download-dir = "~/Downloads"   # -d, --download-dir
 yes = false                    # -y, --yes
 
-# Extensions to ignore entirely during updates
+# Extensions to ignore entirely during updates (alias: ignore_extensions)
 ignore = [
     "ms-python.python"
 ]
@@ -84,10 +84,12 @@ Run the script to look for updates and select which ones to install:
 ```
 * **Controls**:
   - `↑` / `↓` : Navigate list
-  - `Space` : Toggle selection
+  - `Space` : Toggle selection (can also select held-back updates marked with `!`)
   - `a` / `A` : Toggle all eligible updates
   - `Enter` : Confirm and install
-  - `Ctrl+C` : Cancel
+  - `Esc` / `Ctrl+C` : Cancel
+
+Held-back updates (newer than `--min-release-age`) are marked with `!` and unselected by default, but can be manually checked with `Space` to override the age buffer.
 
 ### 2. Auto-Upgrade All Extensions (Non-interactive)
 Suitable for cron jobs or start-up scripts:
