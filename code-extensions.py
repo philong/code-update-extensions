@@ -3259,9 +3259,7 @@ def main():
         prog="code-extensions",
         description="VS Code Extension Manager: Install, update, list, search, and remove extensions with security controls.",
     )
-    subparsers = parser.add_subparsers(
-        dest="command", required=True, help="Subcommand to execute"
-    )
+    subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
 
     # Install sub-parser
     parser_install = subparsers.add_parser(
@@ -3519,6 +3517,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
 
     if args.command == "install":
         handle_install(args, config)
