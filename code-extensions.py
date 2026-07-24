@@ -56,15 +56,43 @@ class Colors:
     BOLD = "\033[1m"
 
 
+def _disable_colors():
+    Colors.BLUE = ""
+    Colors.CYAN = ""
+    Colors.GREEN = ""
+    Colors.YELLOW = ""
+    Colors.RED = ""
+    Colors.ENDC = ""
+    Colors.BOLD = ""
+
+
+def _enable_windows_vt():
+    """Enable ANSI escape processing on the Windows console. Returns success."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        return bool(
+            kernel32.SetConsoleMode(
+                handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            )
+        )
+    except Exception:
+        return False
+
+
 def enable_colors():
     if not sys.stdout.isatty():
-        Colors.BLUE = ""
-        Colors.CYAN = ""
-        Colors.GREEN = ""
-        Colors.YELLOW = ""
-        Colors.RED = ""
-        Colors.ENDC = ""
-        Colors.BOLD = ""
+        _disable_colors()
+        return
+    if os.name == "nt" and not _enable_windows_vt():
+        # Legacy console without VT support would print raw escape codes.
+        _disable_colors()
 
 
 def get_local_target_platform():
@@ -148,9 +176,15 @@ def parse_code_binary(code_binary):
 
 
 def run_code_cmd(args, retries=3, delay=1.0):
+    # On Windows the `code` CLI is a batch script (code.cmd); CreateProcess
+    # cannot launch .cmd/.bat directly, so route those through the shell, which
+    # CPython wraps as `cmd /c "<quoted args>"`.
+    use_shell = os.name == "nt" and str(args[0]).lower().endswith((".cmd", ".bat"))
     for attempt in range(retries + 1):
         try:
-            return subprocess.run(args, capture_output=True, text=True, check=True)
+            return subprocess.run(
+                args, capture_output=True, text=True, check=True, shell=use_shell
+            )
         except subprocess.CalledProcessError as e:
             if attempt < retries:
                 cmd_str = " ".join(args)
@@ -307,6 +341,29 @@ def parse_age_threshold(age_str):
     elif unit == "m":
         return datetime.timedelta(minutes=value)
     return datetime.timedelta(0)
+
+
+def released_long_enough(ver_obj, min_age):
+    """Return True if the version passes the minimum-release-age gate.
+
+    A version with no min_age, no lastUpdated, or an unparseable timestamp is
+    treated as eligible (True); only a version that is verifiably too recent
+    returns False.
+    """
+    if not min_age or min_age <= datetime.timedelta(0):
+        return True
+    last_updated = ver_obj.get("lastUpdated")
+    if not last_updated:
+        return True
+    try:
+        cleaned_ts = (
+            last_updated[:-1] + "+00:00" if last_updated.endswith("Z") else last_updated
+        )
+        release_dt = datetime.datetime.fromisoformat(cleaned_ts)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return now - release_dt >= min_age
+    except Exception:
+        return True
 
 
 def get_cache_dir():
@@ -486,6 +543,8 @@ CONFIG_OPTION_TYPES = {
     "open_vsx": bool,
 }
 
+EXT_OPTION_KEYS = frozenset({"ignore", "min_release_age", "skip_versions"})
+
 
 def coerce_config_value(val, expected_type):
     if expected_type is bool:
@@ -496,6 +555,8 @@ def coerce_config_value(val, expected_type):
         raise ValueError(f"expected true or false, got {val!r}")
     if isinstance(val, str):
         return val
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return str(val)
     raise ValueError(f"expected a string, got {val!r}")
 
 
@@ -598,6 +659,300 @@ def resolve_option(args_val, config, key, default):
     return default
 
 
+def resolve_service_url(args, config):
+    open_vsx = resolve_option(
+        getattr(args, "open_vsx", None), config, "open_vsx", False
+    )
+    if open_vsx:
+        return OPEN_VSX_SERVICE_URL
+    url = resolve_option(
+        getattr(args, "service_url", None), config, "service_url", DEFAULT_SERVICE_URL
+    ).rstrip("/")
+    if url.lower().startswith("http://"):
+        print(
+            f"{Colors.YELLOW}Warning: Service URL '{url}' uses insecure HTTP; extension metadata and downloads could be tampered with in transit.{Colors.ENDC}",
+            file=sys.stderr,
+        )
+    return url
+
+
+def get_default_config_path():
+    if os.path.exists("./config.toml"):
+        return os.path.abspath("./config.toml")
+    user_config_dir = os.path.expanduser("~/.config/code-extensions")
+    return os.path.join(user_config_dir, "config.toml")
+
+
+def dump_toml(data):
+    lines = []
+    top_keys = [k for k in data if not isinstance(data[k], dict)]
+    for k in sorted(top_keys):
+        v = data[k]
+        if isinstance(v, bool):
+            lines.append(f"{k} = {'true' if v else 'false'}")
+        elif isinstance(v, (int, float)):
+            lines.append(f"{k} = {v}")
+        elif isinstance(v, list):
+            items_str = ", ".join(f'"{x}"' for x in v)
+            lines.append(f"{k} = [{items_str}]")
+        else:
+            lines.append(f'{k} = "{v}"')
+
+    if top_keys and any(isinstance(data[k], dict) for k in data):
+        lines.append("")
+
+    dict_keys = [k for k in data if isinstance(data[k], dict)]
+    for k in sorted(dict_keys):
+        subdict = data[k]
+        if not subdict:
+            continue
+        lines.append(f"[{k}]")
+        for sk in sorted(subdict.keys()):
+            val = subdict[sk]
+            if isinstance(val, dict):
+                lines.append(f'\n[extensions."{sk}"]')
+                for ik in sorted(val.keys()):
+                    iv = val[ik]
+                    if isinstance(iv, bool):
+                        lines.append(f"  {ik} = {'true' if iv else 'false'}")
+                    elif isinstance(iv, (int, float)):
+                        lines.append(f"  {ik} = {iv}")
+                    elif isinstance(iv, list):
+                        items_str = ", ".join(f'"{x}"' for x in iv)
+                        lines.append(f"  {ik} = [{items_str}]")
+                    else:
+                        lines.append(f'  {ik} = "{iv}"')
+            else:
+                if isinstance(val, bool):
+                    lines.append(f"  {sk} = {'true' if val else 'false'}")
+                elif isinstance(val, (int, float)):
+                    lines.append(f"  {sk} = {val}")
+                elif isinstance(val, list):
+                    items_str = ", ".join(f'"{x}"' for x in val)
+                    lines.append(f"  {sk} = [{items_str}]")
+                else:
+                    lines.append(f'  {sk} = "{val}"')
+        lines.append("")
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def save_config(config, config_path):
+    dir_path = os.path.dirname(config_path)
+    if dir_path:
+        os.makedirs(dir_path, mode=0o755, exist_ok=True)
+    content = dump_toml(config)
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def parse_config_key(key):
+    key = str(key).strip()
+    if key.startswith("extensions."):
+        key = key[len("extensions.") :]
+
+    if "." in key:
+        parts = key.rsplit(".", 1)
+        ext_id, prop = parts[0].lower(), parts[1].lower()
+        return ("extension", ext_id, prop)
+    else:
+        return ("global", key.lower(), None)
+
+
+def handle_config(args, config):
+    config_path = get_default_config_path()
+    action = args.action or "list"
+
+    if action == "list" and not args.key:
+        print(f"{Colors.BOLD}Configuration file:{Colors.ENDC} {config_path}\n")
+        print(f"{Colors.BOLD}Active Global Overrides:{Colors.ENDC}")
+        globals_found = False
+        for k in sorted(config.keys()):
+            if k != "extensions":
+                print(f"  {Colors.CYAN}{k:<22}{Colors.ENDC} = {config[k]!r}")
+                globals_found = True
+        if not globals_found:
+            print("  (no global settings overridden)")
+
+        exts = config.get("extensions", {})
+        print(f"\n{Colors.BOLD}Active Extension Rules:{Colors.ENDC}")
+        if not exts:
+            print("  (no extension-specific rules configured)")
+        else:
+            for ext_id in sorted(exts.keys()):
+                print(f"  {Colors.BOLD}{Colors.CYAN}{ext_id}{Colors.ENDC}:")
+                for pk, pv in sorted(exts[ext_id].items()):
+                    print(f"    {pk} = {pv!r}")
+
+        print(
+            f"\n{Colors.BOLD}Available Global Settings{Colors.ENDC} (use 'code-extensions config set <key> <val>'):"
+        )
+        global_ref = [
+            (
+                "min_release_age",
+                "Minimum release age threshold (e.g. '24h', '3d', '0')",
+                "24h",
+            ),
+            (
+                "code_binary",
+                "VS Code executable path or command (e.g. 'code', 'codium')",
+                "code",
+            ),
+            (
+                "include_prerelease",
+                "Allow pre-release versions by default (true/false)",
+                "false",
+            ),
+            (
+                "no_code_version_check",
+                "Disable engine version check (true/false)",
+                "false",
+            ),
+            (
+                "download_dir",
+                "Custom directory path for downloaded .vsix files",
+                "system temp",
+            ),
+            ("open_vsx", "Use Open VSX registry by default (true/false)", "false"),
+            (
+                "service_url",
+                "Custom Extension Gallery API endpoint URL",
+                "Marketplace API",
+            ),
+        ]
+        for key, desc, default in global_ref:
+            print(f"  {Colors.CYAN}{key:<22}{Colors.ENDC} {desc} [Default: {default}]")
+
+        print(
+            f"\n{Colors.BOLD}Available Per-Extension Rules{Colors.ENDC} (use 'code-extensions config set <pub.name>.<key> <val>'):"
+        )
+        ext_ref = [
+            (
+                "min_release_age",
+                "Per-extension minimum release age override (e.g. '6h', '0')",
+            ),
+            ("ignore", "Exclude extension from automatic updates (true/false)"),
+            ("skip_versions", "List of version strings to skip (e.g. ['1.2.3'])"),
+        ]
+        for key, desc in ext_ref:
+            print(f"  {Colors.CYAN}{key:<22}{Colors.ENDC} {desc}")
+        print()
+        return
+
+    if action == "get":
+        if not args.key:
+            print(
+                f"{Colors.RED}Error: 'config get' requires a setting key.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        target_type, ext_id, prop = parse_config_key(args.key)
+        if target_type == "global":
+            val = config.get(ext_id)
+            if val is not None:
+                print(val)
+            else:
+                print(
+                    f"{Colors.YELLOW}Key '{args.key}' is not set in configuration.{Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            exts = config.get("extensions", {})
+            val = exts.get(ext_id, {}).get(prop)
+            if val is not None:
+                print(val)
+            else:
+                print(
+                    f"{Colors.YELLOW}Key '{args.key}' is not set in configuration.{Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        return
+
+    if action == "set":
+        if not args.key or args.value is None:
+            print(
+                f"{Colors.RED}Error: 'config set' requires both key and value (e.g. 'code-extensions config set min_release_age 3d').{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        target_type, ext_id, prop = parse_config_key(args.key)
+        raw_val = args.value.strip()
+        coerced_val = raw_val
+        if raw_val.lower() == "true":
+            coerced_val = True
+        elif raw_val.lower() == "false":
+            coerced_val = False
+
+        if target_type == "global":
+            norm_key = ext_id.replace("-", "_")
+            if norm_key not in CONFIG_OPTION_TYPES:
+                print(
+                    f"{Colors.RED}Error: Unknown global setting '{args.key}'. Valid keys: {', '.join(sorted(CONFIG_OPTION_TYPES))}.{Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            config[norm_key] = coerced_val
+        else:
+            norm_prop = prop.replace("-", "_")
+            if norm_prop not in EXT_OPTION_KEYS:
+                print(
+                    f"{Colors.RED}Error: Unknown per-extension setting '{norm_prop}'. Valid keys: {', '.join(sorted(EXT_OPTION_KEYS))}.{Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if "extensions" not in config or not isinstance(config["extensions"], dict):
+                config["extensions"] = {}
+            norm_ext_id = ext_id.lower()
+            if norm_ext_id not in config["extensions"]:
+                config["extensions"][norm_ext_id] = {}
+            config["extensions"][norm_ext_id][norm_prop] = coerced_val
+
+        save_config(config, config_path)
+        print(
+            f"  {Colors.GREEN}✓ Set '{args.key}' = {raw_val!r} in {config_path}{Colors.ENDC}"
+        )
+        return
+
+    if action in ("unset", "delete"):
+        if not args.key:
+            print(
+                f"{Colors.RED}Error: 'config unset' requires a setting key.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        target_type, ext_id, prop = parse_config_key(args.key)
+        changed = False
+
+        if target_type == "global":
+            norm_key = ext_id.replace("-", "_")
+            if norm_key in config:
+                del config[norm_key]
+                changed = True
+        else:
+            exts = config.get("extensions", {})
+            norm_ext_id = ext_id.lower()
+            norm_prop = prop.replace("-", "_")
+            if norm_ext_id in exts and norm_prop in exts[norm_ext_id]:
+                del exts[norm_ext_id][norm_prop]
+                if not exts[norm_ext_id]:
+                    del exts[norm_ext_id]
+                changed = True
+
+        if changed:
+            save_config(config, config_path)
+            print(f"  {Colors.GREEN}✓ Unset '{args.key}' in {config_path}{Colors.ENDC}")
+        else:
+            print(
+                f"  {Colors.YELLOW}Key '{args.key}' is not set in configuration.{Colors.ENDC}"
+            )
+        return
+
+
 def get_vsix_download_url(
     ver_obj, pub_name, ext_name, version, platform, service_url=DEFAULT_SERVICE_URL
 ):
@@ -634,6 +989,94 @@ def vsix_filename(pub_name, ext_name, version, platform):
     return filename + ".vsix"
 
 
+def _post_extension_query(payload, service_url):
+    """POST an extensionquery payload, with a 1h on-disk cache and retries.
+
+    Returns the parsed JSON response, or None if the request ultimately failed.
+    """
+    req_data = json.dumps(payload).encode("utf-8")
+    cache_key_data = {"service_url": service_url, "payload": payload}
+    payload_hash = hashlib.sha256(
+        json.dumps(cache_key_data, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    cache_file = os.path.join(get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json")
+
+    if os.path.exists(cache_file):
+        try:
+            if time.time() - os.path.getmtime(cache_file) < 3600:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+
+    query_endpoint = f"{service_url.rstrip('/')}/extensionquery"
+    if "api-version=" not in query_endpoint:
+        query_endpoint += "?api-version=7.2-preview.1"
+
+    req = urllib.request.Request(
+        query_endpoint,
+        data=req_data,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json; api-version=7.2-preview.1",
+        },
+        method="POST",
+    )
+
+    max_retries = 3
+    backoff = 2.0
+    err = None
+    for attempt in range(max_retries + 1):
+        retry_reason = None
+        retry_after = None
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                resp_data = json.loads(response.read().decode("utf-8"))
+            try:
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(resp_data, f)
+            except Exception:
+                pass
+            return resp_data
+        except urllib.error.HTTPError as e:
+            err = e
+            if 500 <= e.code < 600:
+                retry_reason = f"returned HTTP status {e.code}"
+            elif e.code == 429:
+                retry_reason = "rate limited (HTTP 429)"
+                ra = e.headers.get("Retry-After")
+                if ra and ra.strip().isdigit():
+                    retry_after = float(ra.strip())
+        except (urllib.error.URLError, TimeoutError) as e:
+            err = e
+            reason = str(getattr(e, "reason", e)).lower()
+            if (
+                isinstance(e, TimeoutError)
+                or "timed out" in reason
+                or "timeout" in reason
+            ):
+                retry_reason = "request timed out"
+        except Exception as e:
+            err = e
+
+        if retry_reason and attempt < max_retries:
+            delay = retry_after if retry_after is not None else backoff
+            print(
+                f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+            backoff *= 2.0
+        else:
+            print(
+                f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            break
+
+    return None
+
+
 def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
     cleanup_stale_cache()
     if not ext_ids:
@@ -662,89 +1105,7 @@ def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
             "flags": 17,
         }
 
-        req_data = json.dumps(payload).encode("utf-8")
-        cache_key_data = {"service_url": service_url, "payload": payload}
-        payload_hash = hashlib.sha256(
-            json.dumps(cache_key_data, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        cache_file = os.path.join(
-            get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json"
-        )
-
-        resp_data = None
-        if os.path.exists(cache_file):
-            try:
-                if time.time() - os.path.getmtime(cache_file) < 3600:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        resp_data = json.load(f)
-            except Exception:
-                pass
-
-        if resp_data is None:
-            query_endpoint = f"{service_url.rstrip('/')}/extensionquery"
-            if "api-version=" not in query_endpoint:
-                query_endpoint += "?api-version=7.2-preview.1"
-
-            req = urllib.request.Request(
-                query_endpoint,
-                data=req_data,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json; api-version=7.2-preview.1",
-                },
-                method="POST",
-            )
-
-            max_retries = 3
-            backoff = 2.0
-            for attempt in range(max_retries + 1):
-                retry_reason = None
-                retry_after = None
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as response:
-                        resp_data = json.loads(response.read().decode("utf-8"))
-                    try:
-                        with open(cache_file, "w", encoding="utf-8") as f:
-                            json.dump(resp_data, f)
-                    except Exception:
-                        pass
-                    break
-                except urllib.error.HTTPError as e:
-                    err = e
-                    if 500 <= e.code < 600:
-                        retry_reason = f"returned HTTP status {e.code}"
-                    elif e.code == 429:
-                        retry_reason = "rate limited (HTTP 429)"
-                        ra = e.headers.get("Retry-After")
-                        if ra and ra.strip().isdigit():
-                            retry_after = float(ra.strip())
-                except (urllib.error.URLError, TimeoutError) as e:
-                    err = e
-                    reason = str(getattr(e, "reason", e)).lower()
-                    if (
-                        isinstance(e, TimeoutError)
-                        or "timed out" in reason
-                        or "timeout" in reason
-                    ):
-                        retry_reason = "request timed out"
-                except Exception as e:
-                    err = e
-
-                if retry_reason and attempt < max_retries:
-                    delay = retry_after if retry_after is not None else backoff
-                    print(
-                        f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
-                        file=sys.stderr,
-                    )
-                    time.sleep(delay)
-                    backoff *= 2.0
-                else:
-                    print(
-                        f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}",
-                        file=sys.stderr,
-                    )
-                    break
-
+        resp_data = _post_extension_query(payload, service_url)
         if not resp_data:
             continue
 
@@ -793,87 +1154,7 @@ def query_marketplace_search(
         "flags": 914,
     }
 
-    req_data = json.dumps(payload).encode("utf-8")
-    cache_key_data = {"service_url": service_url, "payload": payload}
-    payload_hash = hashlib.sha256(
-        json.dumps(cache_key_data, sort_keys=True).encode("utf-8")
-    ).hexdigest()
-    cache_file = os.path.join(get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json")
-
-    resp_data = None
-    if os.path.exists(cache_file):
-        try:
-            if time.time() - os.path.getmtime(cache_file) < 3600:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    resp_data = json.load(f)
-        except Exception:
-            pass
-
-    if resp_data is None:
-        query_endpoint = f"{service_url.rstrip('/')}/extensionquery"
-        if "api-version=" not in query_endpoint:
-            query_endpoint += "?api-version=7.2-preview.1"
-
-        req = urllib.request.Request(
-            query_endpoint,
-            data=req_data,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json; api-version=7.2-preview.1",
-            },
-            method="POST",
-        )
-
-        max_retries = 3
-        backoff = 2.0
-        for attempt in range(max_retries + 1):
-            retry_reason = None
-            retry_after = None
-            try:
-                with urllib.request.urlopen(req, timeout=30) as response:
-                    resp_data = json.loads(response.read().decode("utf-8"))
-                try:
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(resp_data, f)
-                except Exception:
-                    pass
-                break
-            except urllib.error.HTTPError as e:
-                err = e
-                if 500 <= e.code < 600:
-                    retry_reason = f"returned HTTP status {e.code}"
-                elif e.code == 429:
-                    retry_reason = "rate limited (HTTP 429)"
-                    ra = e.headers.get("Retry-After")
-                    if ra and ra.strip().isdigit():
-                        retry_after = float(ra.strip())
-            except (urllib.error.URLError, TimeoutError) as e:
-                err = e
-                reason = str(getattr(e, "reason", e)).lower()
-                if (
-                    isinstance(e, TimeoutError)
-                    or "timed out" in reason
-                    or "timeout" in reason
-                ):
-                    retry_reason = "request timed out"
-            except Exception as e:
-                err = e
-
-            if retry_reason and attempt < max_retries:
-                delay = retry_after if retry_after is not None else backoff
-                print(
-                    f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
-                    file=sys.stderr,
-                )
-                time.sleep(delay)
-                backoff *= 2.0
-            else:
-                print(
-                    f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}",
-                    file=sys.stderr,
-                )
-                break
-
+    resp_data = _post_extension_query(payload, service_url)
     if not resp_data:
         return []
 
@@ -934,21 +1215,8 @@ def query_marketplace_search(
 
             eligible_ver_obj = None
             for ver_obj in compatible_versions:
-                if eff_min_age and eff_min_age > datetime.timedelta(0):
-                    last_updated = ver_obj.get("lastUpdated")
-                    if last_updated:
-                        try:
-                            cleaned_ts = (
-                                last_updated[:-1] + "+00:00"
-                                if last_updated.endswith("Z")
-                                else last_updated
-                            )
-                            release_dt = datetime.datetime.fromisoformat(cleaned_ts)
-                            now = datetime.datetime.now(datetime.timezone.utc)
-                            if now - release_dt < eff_min_age:
-                                continue
-                        except Exception:
-                            pass
+                if not released_long_enough(ver_obj, eff_min_age):
+                    continue
                 eligible_ver_obj = ver_obj
                 break
 
@@ -1145,6 +1413,15 @@ def fit_column(text, width):
     return t
 
 
+def format_action_bar(items):
+    formatted = []
+    for keys_str, action_name, color_code in items:
+        formatted.append(
+            f"[{color_code}{Colors.BOLD}{keys_str}{Colors.ENDC}] {action_name}"
+        )
+    return f"{Colors.BOLD}Actions:{Colors.ENDC} " + "   ".join(formatted)
+
+
 def prompt_yes_no(question, default=False):
     suffix = " [Y/n] " if default else " [y/N] "
     try:
@@ -1161,14 +1438,7 @@ def handle_install(args, config):
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
-    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
-    service_url = (
-        OPEN_VSX_SERVICE_URL
-        if open_vsx
-        else resolve_option(
-            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
-        ).rstrip("/")
-    )
+    service_url = resolve_service_url(args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -1244,6 +1514,7 @@ def handle_install(args, config):
     ext_ids = [t[0] for t in parsed_targets]
     print(f"{Colors.BLUE}Querying extension gallery for installation...{Colors.ENDC}")
     marketplace_data = query_marketplace_extensions(ext_ids, service_url=service_url)
+    installed_exts = get_installed_extensions(code_binary)
 
     download_dir = resolve_option(args.download_dir, config, "download_dir", None)
     if download_dir is not None:
@@ -1267,9 +1538,11 @@ def handle_install(args, config):
 
         ext_cfg = extensions_config.get(full_id, {})
         eff_min_age = min_release_age
+        eff_min_age_str = min_release_age_str
         if args.min_release_age is None and "min_release_age" in ext_cfg:
             try:
                 eff_min_age = parse_age_threshold(ext_cfg["min_release_age"])
+                eff_min_age_str = str(ext_cfg["min_release_age"])
             except ValueError:
                 pass
 
@@ -1314,21 +1587,8 @@ def handle_install(args, config):
 
         eligible_ver_obj = None
         for ver_obj in compatible_versions:
-            if eff_min_age and eff_min_age > datetime.timedelta(0):
-                last_updated = ver_obj.get("lastUpdated")
-                if last_updated:
-                    try:
-                        cleaned_ts = (
-                            last_updated[:-1] + "+00:00"
-                            if last_updated.endswith("Z")
-                            else last_updated
-                        )
-                        release_dt = datetime.datetime.fromisoformat(cleaned_ts)
-                        now = datetime.datetime.now(datetime.timezone.utc)
-                        if now - release_dt < eff_min_age:
-                            continue
-                    except Exception:
-                        pass
+            if not released_long_enough(ver_obj, eff_min_age):
+                continue
             eligible_ver_obj = ver_obj
             break
 
@@ -1336,21 +1596,7 @@ def handle_install(args, config):
 
         if req_ver:
             target_ver_obj = compatible_versions[0]
-            last_updated = target_ver_obj.get("lastUpdated")
-            is_too_fresh = False
-            if eff_min_age and eff_min_age > datetime.timedelta(0) and last_updated:
-                try:
-                    cleaned_ts = (
-                        last_updated[:-1] + "+00:00"
-                        if last_updated.endswith("Z")
-                        else last_updated
-                    )
-                    release_dt = datetime.datetime.fromisoformat(cleaned_ts)
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    if now - release_dt < eff_min_age:
-                        is_too_fresh = True
-                except Exception:
-                    pass
+            is_too_fresh = not released_long_enough(target_ver_obj, eff_min_age)
 
             if is_too_fresh:
                 print(
@@ -1372,7 +1618,7 @@ def handle_install(args, config):
                 selected_ver_obj = eligible_ver_obj
                 if eligible_ver_obj != latest_ver_obj:
                     print(
-                        f"{Colors.YELLOW}Notice: Latest version '{latest_ver_obj['version']}' of '{full_id}' is held back by minimum release age policy ({eff_min_age_str if 'eff_min_age_str' in locals() else min_release_age_str}). Installing latest eligible version '{eligible_ver_obj['version']}'.{Colors.ENDC}"
+                        f"{Colors.YELLOW}Notice: Latest version '{latest_ver_obj['version']}' of '{full_id}' is held back by minimum release age policy ({eff_min_age_str}). Installing latest eligible version '{eligible_ver_obj['version']}'.{Colors.ENDC}"
                     )
             else:
                 latest_ver_str = latest_ver_obj["version"]
@@ -1394,6 +1640,20 @@ def handle_install(args, config):
                     continue
 
         target_version = selected_ver_obj["version"]
+        installed_ver = installed_exts.get(full_id)
+        force = getattr(args, "force", False)
+
+        if (
+            installed_ver
+            and parse_version(installed_ver) == parse_version(target_version)
+            and not force
+            and not req_ver
+        ):
+            print(
+                f"  {Colors.GREEN}✓ Extension '{full_id}' is already installed at version v{installed_ver} (latest eligible version). Skipping.{Colors.ENDC}"
+            )
+            continue
+
         target_plat = selected_ver_obj.get("targetPlatform") or "universal"
         url = get_vsix_download_url(
             selected_ver_obj,
@@ -1472,6 +1732,8 @@ def check_updates(
         skipped_versions = ext_cfg.get("skip_versions", [])
 
         compatible_versions = []
+        # The gallery returns versions newest-first, so the first version at or
+        # below the installed one marks the end of newer releases to consider.
         for ver_obj in ext.get("versions", []):
             version_str = ver_obj.get("version")
             if not version_str:
@@ -1514,21 +1776,8 @@ def check_updates(
         if parse_version(latest_version) > parse_version(installed_ver):
             eligible_ver_obj = None
             for ver_obj in compatible_versions:
-                if eff_min_age and eff_min_age > datetime.timedelta(0):
-                    last_updated = ver_obj.get("lastUpdated")
-                    if last_updated:
-                        try:
-                            cleaned_ts = (
-                                last_updated[:-1] + "+00:00"
-                                if last_updated.endswith("Z")
-                                else last_updated
-                            )
-                            release_dt = datetime.datetime.fromisoformat(cleaned_ts)
-                            now = datetime.datetime.now(datetime.timezone.utc)
-                            if now - release_dt < eff_min_age:
-                                continue
-                        except Exception:
-                            pass
+                if not released_long_enough(ver_obj, eff_min_age):
+                    continue
                 eligible_ver_obj = ver_obj
                 break
 
@@ -1654,7 +1903,15 @@ def select_updates(updates):
 
             out = []
             out.append(
-                f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Esc/Ctrl+C=cancel{Colors.ENDC}"
+                format_action_bar(
+                    [
+                        ("Space", "Toggle", Colors.CYAN),
+                        ("a", "Toggle All", Colors.CYAN),
+                        ("↑/↓", "Move", Colors.CYAN),
+                        ("Enter", "Install", Colors.GREEN),
+                        ("q/Esc", "Exit", Colors.RED),
+                    ]
+                )
             )
             out.append(
                 f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Installed', W_VER)} "
@@ -1748,14 +2005,7 @@ def handle_update(args, config):
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
-    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
-    service_url = (
-        OPEN_VSX_SERVICE_URL
-        if open_vsx
-        else resolve_option(
-            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
-        ).rstrip("/")
-    )
+    service_url = resolve_service_url(args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -1921,7 +2171,15 @@ def select_removals(installed_exts):
 
             out = []
             out.append(
-                f"{Colors.RED}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=uninstall  Esc/Ctrl+C=cancel{Colors.ENDC}"
+                format_action_bar(
+                    [
+                        ("Space", "Toggle", Colors.CYAN),
+                        ("a", "Toggle All", Colors.CYAN),
+                        ("↑/↓", "Move", Colors.CYAN),
+                        ("Enter", "Uninstall", Colors.RED),
+                        ("q/Esc", "Exit", Colors.YELLOW),
+                    ]
+                )
             )
             out.append(
                 f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Version', W_VER)}{Colors.ENDC}"
@@ -2066,14 +2324,7 @@ def handle_list(args, config):
         ext_items = [item for item in ext_items if q in item[0]]
 
     if args.outdated:
-        open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
-        service_url = (
-            OPEN_VSX_SERVICE_URL
-            if open_vsx
-            else resolve_option(
-                args.service_url, config, "service_url", DEFAULT_SERVICE_URL
-            ).rstrip("/")
-        )
+        service_url = resolve_service_url(args, config)
         vscode_version = get_vscode_version(code_binary)
         target_platform = get_local_target_platform()
         min_release_age_str = resolve_option(None, config, "min_release_age", "24h")
@@ -2129,13 +2380,65 @@ def handle_list(args, config):
     print(f"\nTotal: {len(ext_items)} extension(s)")
 
 
-def select_search_results(search_results):
+def show_search_item_info(item, config, args):
+    ext_id = item["id"]
+
+    class DummyArgs:
+        pass
+
+    info_args = DummyArgs()
+    info_args.extension = ext_id
+    info_args.code_binary = getattr(args, "code_binary", None)
+    info_args.service_url = getattr(args, "service_url", None)
+    info_args.open_vsx = getattr(args, "open_vsx", None)
+    info_args.min_release_age = getattr(args, "min_release_age", None)
+
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+    handle_info(info_args, config)
+
+    print(
+        format_action_bar(
+            [
+                ("i/Enter", "Install", Colors.GREEN),
+                ("b/Esc", "Back to Search Results", Colors.YELLOW),
+                ("q", "Exit", Colors.RED),
+            ]
+        )
+    )
+
+    while True:
+        key = get_key()
+        if key in ("i", "I", "enter"):
+            return "install"
+        elif key in ("b", "B", "esc", "backspace"):
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
+            return "back"
+        elif key in ("q", "Q", "ctrl+c"):
+            return "exit"
+
+
+def install_search_items(ext_ids, config, args):
+    print(
+        f"\n{Colors.GREEN}{Colors.BOLD}Installing selected extension(s):{Colors.ENDC} {', '.join(ext_ids)}\n"
+    )
+    args.extensions = ext_ids
+    args.include_prerelease = getattr(args, "include_prerelease", False)
+    args.no_code_version_check = getattr(args, "no_code_version_check", False)
+    args.download_dir = getattr(args, "download_dir", None)
+    args.yes = True
+    args.min_release_age = getattr(args, "min_release_age", None)
+    handle_install(args, config)
+
+
+def interactive_search_flow(search_results, config, args):
     if not HAS_TTY or not sys.stdin.isatty() or not sys.stdout.isatty():
-        return []
+        return
 
     n = len(search_results)
     if n == 0:
-        return []
+        return
 
     selected = [False] * n
     cursor_idx = 0
@@ -2148,13 +2451,13 @@ def select_search_results(search_results):
     def visual_len(s):
         return display_width(s)
 
-    first_frame = True
-    prev_lines = 0
-
     sys.stdout.write("\033[?25l")
     sys.stdout.flush()
 
     try:
+        first_frame = True
+        prev_lines = 0
+
         while True:
             cols, rows = shutil.get_terminal_size((80, 24))
             id_w = max(15, (cols - OVERHEAD) // 2)
@@ -2171,7 +2474,16 @@ def select_search_results(search_results):
 
             out = []
             out.append(
-                f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Esc/Ctrl+C=cancel{Colors.ENDC}"
+                format_action_bar(
+                    [
+                        ("Space", "Toggle", Colors.CYAN),
+                        ("a", "Toggle All", Colors.CYAN),
+                        ("↑/↓", "Move", Colors.CYAN),
+                        ("Enter", "View Info", Colors.GREEN),
+                        ("i", "Install", Colors.GREEN),
+                        ("q/Esc", "Exit", Colors.RED),
+                    ]
+                )
             )
             out.append(
                 f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Display Name', W_NAME)} "
@@ -2214,8 +2526,10 @@ def select_search_results(search_results):
             sys.stdout.flush()
 
             key = get_key()
-            if key in ("ctrl+c", "esc"):
-                raise KeyboardInterrupt
+            if key in ("ctrl+c", "esc", "q", "Q"):
+                sys.stdout.write("\n\033[?25h")
+                sys.stdout.flush()
+                return
             elif key == "up":
                 cursor_idx = (cursor_idx - 1) % n
             elif key == "down":
@@ -2224,33 +2538,40 @@ def select_search_results(search_results):
                 selected[cursor_idx] = not selected[cursor_idx]
             elif key in ("a", "A"):
                 selected = [False] * n if any(selected) else [True] * n
-            elif key == "enter":
-                break
-
-        sys.stdout.write("\n\033[?25h")
-        sys.stdout.flush()
-
-        return [search_results[i]["id"] for i in range(n) if selected[i]]
+            elif key in ("enter", "info"):
+                sys.stdout.write("\n\033[?25h")
+                sys.stdout.flush()
+                action = show_search_item_info(search_results[cursor_idx], config, args)
+                if action == "exit":
+                    return
+                elif action == "install":
+                    to_install = [search_results[cursor_idx]["id"]]
+                    install_search_items(to_install, config, args)
+                    return
+                first_frame = True
+                prev_lines = 0
+                sys.stdout.write("\033[?25l")
+                sys.stdout.flush()
+            elif key in ("i", "I"):
+                sys.stdout.write("\n\033[?25h")
+                sys.stdout.flush()
+                to_install = [search_results[i]["id"] for i in range(n) if selected[i]]
+                if not to_install:
+                    to_install = [search_results[cursor_idx]["id"]]
+                install_search_items(to_install, config, args)
+                return
 
     except KeyboardInterrupt:
         sys.stdout.write("\n\033[?25h")
         sys.stdout.flush()
-        print("Selection cancelled.")
-        sys.exit(0)
+        return
 
 
 def handle_search(args, config):
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
-    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
-    service_url = (
-        OPEN_VSX_SERVICE_URL
-        if open_vsx
-        else resolve_option(
-            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
-        ).rstrip("/")
-    )
+    service_url = resolve_service_url(args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -2290,6 +2611,10 @@ def handle_search(args, config):
         print(f"No extensions found matching '{args.query}'.")
         return
 
+    if HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty() and not args.quiet:
+        interactive_search_flow(results, config, args)
+        return
+
     if args.quiet:
         for r in results:
             print(r["id"])
@@ -2317,34 +2642,9 @@ def handle_search(args, config):
 
     print(f"\nFound {len(results)} matching extension(s).")
 
-    if args.interactive or (HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty()):
-        print()
-        if prompt_yes_no(
-            "Would you like to select extensions to install from these search results?",
-            default=False,
-        ):
-            selected_ids = select_search_results(results)
-            if selected_ids:
-                args.extensions = selected_ids
-                args.include_prerelease = getattr(args, "include_prerelease", False)
-                args.no_code_version_check = getattr(
-                    args, "no_code_version_check", False
-                )
-                args.download_dir = getattr(args, "download_dir", None)
-                args.yes = True
-                args.min_release_age = getattr(args, "min_release_age", None)
-                handle_install(args, config)
-
 
 def handle_info(args, config):
-    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
-    service_url = (
-        OPEN_VSX_SERVICE_URL
-        if open_vsx
-        else resolve_option(
-            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
-        ).rstrip("/")
-    )
+    service_url = resolve_service_url(args, config)
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
@@ -2355,10 +2655,22 @@ def handle_info(args, config):
 
     if "." not in ext_id:
         print(
-            f"{Colors.RED}Error: Invalid extension ID '{args.extension}'. Expected format 'publisher.name'.{Colors.ENDC}",
-            file=sys.stderr,
+            f"{Colors.BLUE}Searching extension gallery for '{ext_id}'...{Colors.ENDC}"
         )
-        sys.exit(1)
+        search_results = query_marketplace_search(
+            ext_id, max_results=5, service_url=service_url
+        )
+        if not search_results:
+            print(
+                f"{Colors.RED}✗ Extension '{ext_id}' not found on extension gallery.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        best_match = search_results[0]["id"]
+        print(
+            f"{Colors.YELLOW}Notice: '{args.extension}' is not a full extension ID. Showing info for top match '{best_match}'.{Colors.ENDC}\n"
+        )
+        ext_id = best_match
 
     print(f"{Colors.BLUE}Fetching extension metadata for '{ext_id}'...{Colors.ENDC}")
     marketplace_data = query_marketplace_extensions([ext_id], service_url=service_url)
@@ -2382,6 +2694,40 @@ def handle_info(args, config):
     latest_ver = versions[0].get("version", "unknown") if versions else "unknown"
     last_updated = versions[0].get("lastUpdated", "") if versions else ""
     release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
+
+    min_release_age_str = resolve_option(
+        getattr(args, "min_release_age", None), config, "min_release_age", "24h"
+    )
+    try:
+        min_release_age = parse_age_threshold(min_release_age_str)
+    except ValueError:
+        min_release_age = datetime.timedelta(hours=24)
+
+    ext_cfg = config.get("extensions", {}).get(full_id, {})
+    eff_min_age = min_release_age
+    if getattr(args, "min_release_age", None) is None and "min_release_age" in ext_cfg:
+        try:
+            eff_min_age = parse_age_threshold(ext_cfg["min_release_age"])
+        except ValueError:
+            pass
+
+    eligible_ver = "unknown"
+    is_held_back = False
+
+    if versions:
+        for ver_obj in versions:
+            v_str = ver_obj.get("version")
+            if not v_str:
+                continue
+            if not released_long_enough(ver_obj, eff_min_age):
+                continue
+            eligible_ver = v_str
+            if v_str != latest_ver:
+                is_held_back = True
+            break
+        else:
+            eligible_ver = "held back"
+            is_held_back = True
 
     categories = ext_obj.get("categories", [])
     cat_str = ", ".join(categories) if categories else "None"
@@ -2413,6 +2759,15 @@ def handle_info(args, config):
     print("=" * (len(display_name) + len(full_id) + 5))
     print(f"  {Colors.BOLD}Publisher:{Colors.ENDC}   {pub_disp} ({pub_name})")
     print(f"  {Colors.BOLD}Latest Ver:{Colors.ENDC}  v{latest_ver} ({release_date})")
+    if is_held_back:
+        el_str = f"v{eligible_ver}" if eligible_ver != "held back" else "held back"
+        print(
+            f"  {Colors.BOLD}Eligible Ver:{Colors.ENDC} {Colors.YELLOW}{el_str}{Colors.ENDC} ({Colors.YELLOW}held back by min-release-age policy{Colors.ENDC})"
+        )
+    else:
+        print(
+            f"  {Colors.BOLD}Eligible Ver:{Colors.ENDC} {Colors.GREEN}v{eligible_ver}{Colors.ENDC} ({Colors.GREEN}latest{Colors.ENDC})"
+        )
     print(f"  {Colors.BOLD}Status:{Colors.ENDC}      {installed_status}")
     print(f"  {Colors.BOLD}Pricing:{Colors.ENDC}     {pricing}")
     print(f"  {Colors.BOLD}Categories:{Colors.ENDC}  {cat_str}")
@@ -2422,6 +2777,308 @@ def handle_info(args, config):
         print(f"  {Colors.BOLD}Homepage:{Colors.ENDC}    {homepage_url}")
     print(f"\n  {Colors.BOLD}Description:{Colors.ENDC}")
     print(f"    {description}\n")
+
+
+def handle_clean(args, config):
+    cache_dir = get_cache_dir()
+    temp_dir = tempfile.gettempdir()
+
+    cleaned_files = 0
+    freed_bytes = 0
+
+    print(f"{Colors.BLUE}Cleaning cached data and temporary files...{Colors.ENDC}")
+
+    if os.path.exists(cache_dir):
+        for f in os.listdir(cache_dir):
+            if f.endswith(".json"):
+                fp = os.path.join(cache_dir, f)
+                try:
+                    size = os.path.getsize(fp)
+                    os.remove(fp)
+                    cleaned_files += 1
+                    freed_bytes += size
+                except Exception:
+                    pass
+
+    if os.path.exists(temp_dir):
+        for f in os.listdir(temp_dir):
+            if f.endswith(".vsix") and ("vscode_ext" in f or f.startswith("ext_")):
+                fp = os.path.join(temp_dir, f)
+                try:
+                    size = os.path.getsize(fp)
+                    os.remove(fp)
+                    cleaned_files += 1
+                    freed_bytes += size
+                except Exception:
+                    pass
+
+    freed_kb = freed_bytes / 1024.0
+    if freed_kb > 1024:
+        freed_str = f"{freed_kb / 1024.0:.2f} MB"
+    else:
+        freed_str = f"{freed_kb:.1f} KB"
+
+    print(
+        f"{Colors.GREEN}✓ Cleaned {cleaned_files} file(s) ({freed_str} freed).{Colors.ENDC}"
+    )
+
+
+FISH_COMPLETION_SCRIPT = """# Fish completion script for code-extensions
+
+complete -c code-extensions -f
+
+complete -c code-extensions -n "__fish_use_subcommand" -a "install" -d "Install VS Code extension(s)"
+complete -c code-extensions -n "__fish_use_subcommand" -a "update" -d "Update installed extensions"
+complete -c code-extensions -n "__fish_use_subcommand" -a "upgrade" -d "Alias for update"
+complete -c code-extensions -n "__fish_use_subcommand" -a "remove" -d "Remove installed extension(s)"
+complete -c code-extensions -n "__fish_use_subcommand" -a "uninstall" -d "Alias for remove"
+complete -c code-extensions -n "__fish_use_subcommand" -a "rm" -d "Alias for remove"
+complete -c code-extensions -n "__fish_use_subcommand" -a "list" -d "List installed extensions"
+complete -c code-extensions -n "__fish_use_subcommand" -a "ls" -d "Alias for list"
+complete -c code-extensions -n "__fish_use_subcommand" -a "search" -d "Search extension gallery"
+complete -c code-extensions -n "__fish_use_subcommand" -a "info" -d "Show extension metadata"
+complete -c code-extensions -n "__fish_use_subcommand" -a "show" -d "Alias for info"
+complete -c code-extensions -n "__fish_use_subcommand" -a "clean" -d "Purge cache and temp VSIX files"
+complete -c code-extensions -n "__fish_use_subcommand" -a "config" -d "View or modify configuration"
+complete -c code-extensions -n "__fish_use_subcommand" -a "completion" -d "Generate shell completion script"
+
+complete -c code-extensions -s b -l code-binary -d "VS Code executable binary or fork" -r
+complete -c code-extensions -s s -l service-url -d "VS Code Extension Gallery service API URL" -r
+complete -c code-extensions -l open-vsx -d "Use Open VSX Registry"
+complete -c code-extensions -s h -l help -d "Show help message"
+
+complete -c code-extensions -n "__fish_seen_subcommand_from config" -a "list get set unset delete"
+complete -c code-extensions -n "__fish_seen_subcommand_from completion" -a "bash zsh fish powershell"
+
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s f -l file -d "File containing extension IDs" -r -F
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s p -l include-prerelease -d "Allow pre-release versions"
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s n -l no-code-version-check -d "Disable VS Code version check"
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s d -l download-dir -d "Download directory for VSIX files" -r -F
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s y -l yes -d "Non-interactive mode"
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -s a -l min-release-age -d "Minimum release age threshold" -r
+complete -c code-extensions -n "__fish_seen_subcommand_from install" -l force -d "Force re-installation"
+
+complete -c code-extensions -n "__fish_seen_subcommand_from list ls" -s q -l quiet -d "Output raw extension IDs only"
+complete -c code-extensions -n "__fish_seen_subcommand_from list ls" -s u -l outdated -d "List extensions with updates available"
+
+complete -c code-extensions -n "__fish_seen_subcommand_from search" -s n -l max-results -d "Maximum search results" -r
+complete -c code-extensions -n "__fish_seen_subcommand_from search" -s q -l quiet -d "Output raw extension IDs only"
+complete -c code-extensions -n "__fish_seen_subcommand_from search" -s p -l include-prerelease -d "Allow pre-release versions"
+complete -c code-extensions -n "__fish_seen_subcommand_from search" -s a -l min-release-age -d "Minimum release age threshold" -r
+
+complete -c code-extensions -n "__fish_seen_subcommand_from remove uninstall rm info show" -a "(code-extensions list -q 2>/dev/null)"
+"""
+
+BASH_COMPLETION_SCRIPT = """# Bash completion script for code-extensions
+
+_code_extensions_completion() {
+    local cur prev words cword
+    _init_completion -n : 2>/dev/null || {
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+    }
+
+    local commands="install update upgrade remove uninstall rm list ls search info show clean config completion"
+    local config_actions="list get set unset delete"
+    local shells="bash zsh fish powershell"
+
+    if [[ $COMP_CWORD -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+        return 0
+    fi
+
+    local cmd="${COMP_WORDS[1]}"
+
+    case "$cmd" in
+        config)
+            if [[ $COMP_CWORD -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$config_actions" -- "$cur") )
+            fi
+            ;;
+        completion)
+            if [[ $COMP_CWORD -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
+            fi
+            ;;
+        remove|uninstall|rm|info|show)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-y --yes -h --help" -- "$cur") )
+            else
+                local installed
+                installed=$(code-extensions list -q 2>/dev/null)
+                COMPREPLY=( $(compgen -W "$installed" -- "$cur") )
+            fi
+            ;;
+        install)
+            COMPREPLY=( $(compgen -W "-f --file -p --include-prerelease -n --no-code-version-check -d --download-dir -y --yes -a --min-release-age --force -h --help" -- "$cur") )
+            ;;
+        update|upgrade)
+            COMPREPLY=( $(compgen -W "-p --include-prerelease -n --no-code-version-check -d --download-dir -y --yes -a --min-release-age -h --help" -- "$cur") )
+            ;;
+        list|ls)
+            COMPREPLY=( $(compgen -W "-q --quiet -u --outdated -h --help" -- "$cur") )
+            ;;
+        search)
+            COMPREPLY=( $(compgen -W "-n --max-results -q --quiet -p --include-prerelease -a --min-release-age -h --help" -- "$cur") )
+            ;;
+        *)
+            COMPREPLY=( $(compgen -W "-b --code-binary -s --service-url --open-vsx -h --help" -- "$cur") )
+            ;;
+    esac
+}
+
+complete -F _code_extensions_completion code-extensions
+"""
+
+ZSH_COMPLETION_SCRIPT = """#compdef code-extensions
+
+_code_extensions() {
+    local -a commands
+    commands=(
+        'install:Install VS Code extension(s)'
+        'update:Check and install updates'
+        'upgrade:Alias for update'
+        'remove:Remove installed extension(s)'
+        'uninstall:Alias for remove'
+        'rm:Alias for remove'
+        'list:List installed extensions'
+        'ls:Alias for list'
+        'search:Search extension gallery'
+        'info:Show detailed metadata for an extension'
+        'show:Alias for info'
+        'clean:Purge API cache and temporary files'
+        'config:View or modify configuration settings'
+        'completion:Generate shell completion script'
+    )
+
+    local -a config_actions
+    config_actions=(
+        'list:List all configuration settings'
+        'get:Get a configuration key value'
+        'set:Set a configuration key value'
+        'unset:Unset a configuration key'
+        'delete:Alias for unset'
+    )
+
+    local -a shells
+    shells=('bash' 'zsh' 'fish' 'powershell')
+
+    _arguments -C \\
+        '(-b --code-binary)'{-b,--code-binary}'[Path to VS Code binary/executable]:binary:_files' \\
+        '(-s --service-url)'{-s,--service-url}'[Extension Gallery API URL]:url:' \\
+        '--open-vsx[Use Open VSX Registry]' \\
+        '(-h --help)'{-h,--help}'[Show help message]' \\
+        '1: :->command' \\
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe -t commands 'code-extensions command' commands
+            ;;
+        args)
+            case $words[1] in
+                config)
+                    _values 'config action' $config_actions
+                    ;;
+                completion)
+                    _values 'shell' $shells
+                    ;;
+                remove|uninstall|rm|info|show)
+                    local -a installed
+                    installed=($(code-extensions list -q 2>/dev/null))
+                    _values 'installed extensions' $installed
+                    ;;
+                install)
+                    _arguments \\
+                        '(-f --file)'{-f,--file}'[File containing extension IDs]:file:_files' \\
+                        '(-p --include-prerelease)'{-p,--include-prerelease}'[Allow pre-release versions]' \\
+                        '(-n --no-code-version-check)'{-n,--no-code-version-check}'[Disable VS Code version check]' \\
+                        '(-d --download-dir)'{-d,--download-dir}'[Download directory]:dir:_files -/' \\
+                        '(-y --yes)'{-y,--yes}'[Non-interactive mode]' \\
+                        '(-a --min-release-age)'{-a,--min-release-age}'[Minimum release age threshold]:age:' \\
+                        '--force[Force re-installation]'
+                    ;;
+                list|ls)
+                    _arguments \\
+                        '(-q --quiet)'{-q,--quiet}'[Output raw extension IDs only]' \\
+                        '(-u --outdated)'{-u,--outdated}'[List extensions with updates available]'
+                    ;;
+                search)
+                    _arguments \\
+                        '(-n --max-results)'{-n,--max-results}'[Maximum search results]:number:' \\
+                        '(-q --quiet)'{-q,--quiet}'[Output raw extension IDs only]' \\
+                        '(-p --include-prerelease)'{-p,--include-prerelease}'[Allow pre-release versions]' \\
+                        '(-a --min-release-age)'{-a,--min-release-age}'[Minimum release age threshold]:age:'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_code_extensions "$@"
+"""
+
+POWERSHELL_COMPLETION_SCRIPT = """# PowerShell completion script for code-extensions
+
+Register-ArgumentCompleter -Native -CommandName 'code-extensions' -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commandElements = $commandAst.CommandElements
+    $command = $commandElements[1].Value
+
+    $subcommands = @('install', 'update', 'upgrade', 'remove', 'uninstall', 'rm', 'list', 'ls', 'search', 'info', 'show', 'clean', 'config', 'completion')
+    $configActions = @('list', 'get', 'set', 'unset', 'delete')
+    $shells = @('bash', 'zsh', 'fish', 'powershell')
+
+    if ($commandElements.Count -eq 2) {
+        $subcommands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+            [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+        }
+        return
+    }
+
+    switch ($command) {
+        'config' {
+            if ($commandElements.Count -eq 3) {
+                $configActions | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                }
+            }
+        }
+        'completion' {
+            if ($commandElements.Count -eq 3) {
+                $shells | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                    [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+                }
+            }
+        }
+        { $_ -in @('remove', 'uninstall', 'rm', 'info', 'show') } {
+            $installed = code-extensions list -q 2>$null
+            $installed | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+                [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+            }
+        }
+    }
+}
+"""
+
+
+def handle_completion(args, config):
+    shell = args.shell.lower().strip()
+    if shell == "fish":
+        sys.stdout.write(FISH_COMPLETION_SCRIPT.strip() + "\n")
+    elif shell == "bash":
+        sys.stdout.write(BASH_COMPLETION_SCRIPT.strip() + "\n")
+    elif shell == "zsh":
+        sys.stdout.write(ZSH_COMPLETION_SCRIPT.strip() + "\n")
+    elif shell == "powershell":
+        sys.stdout.write(POWERSHELL_COMPLETION_SCRIPT.strip() + "\n")
+    else:
+        print(
+            f"{Colors.RED}Error: Unsupported shell '{shell}'. Supported: bash, fish, powershell, zsh{Colors.ENDC}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def main():
@@ -2507,10 +3164,17 @@ def main():
         default=None,
         help="Minimum release age threshold (e.g. 24h, 3d, 0)",
     )
+    parser_install.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Force re-installation even if the target version is already installed",
+    )
 
     # Update sub-parser
     parser_update = subparsers.add_parser(
         "update",
+        aliases=["upgrade"],
         parents=[parent_parser],
         help="Check, download, and install updates for installed extensions",
     )
@@ -2551,6 +3215,7 @@ def main():
     # Remove sub-parser
     parser_remove = subparsers.add_parser(
         "remove",
+        aliases=["uninstall", "rm"],
         parents=[parent_parser],
         help="Remove installed extension(s)",
     )
@@ -2571,6 +3236,7 @@ def main():
     # List sub-parser
     parser_list = subparsers.add_parser(
         "list",
+        aliases=["ls"],
         parents=[parent_parser],
         help="List installed extension(s)",
     )
@@ -2620,13 +3286,6 @@ def main():
         help="Output raw extension IDs only (one per line, ideal for scripting)",
     )
     parser_search.add_argument(
-        "-i",
-        "--interactive",
-        action="store_true",
-        default=False,
-        help="Interactively select extensions to install from search results",
-    )
-    parser_search.add_argument(
         "-p",
         "--include-prerelease",
         action="store_true",
@@ -2659,20 +3318,71 @@ def main():
         help="Extension ID (e.g. ms-python.python)",
     )
 
+    # Clean sub-parser
+    parser_clean = subparsers.add_parser(
+        "clean",
+        parents=[parent_parser],
+        help="Purge cached API response JSON files and temporary VSIX downloads",
+    )
+
+    # Config sub-parser
+    parser_config = subparsers.add_parser(
+        "config",
+        parents=[parent_parser],
+        help="View or modify configuration settings in config.toml",
+    )
+    parser_config.add_argument(
+        "action",
+        nargs="?",
+        choices=["list", "get", "set", "unset", "delete"],
+        default="list",
+        help="Action to perform: list, get, set, unset",
+    )
+    parser_config.add_argument(
+        "key",
+        nargs="?",
+        default=None,
+        help="Configuration setting key (e.g. min_release_age or charliermarsh.ruff.min_release_age)",
+    )
+    parser_config.add_argument(
+        "value",
+        nargs="?",
+        default=None,
+        help="Configuration value to set (for 'set' action)",
+    )
+
+    # Completion sub-parser
+    parser_completion = subparsers.add_parser(
+        "completion",
+        parents=[parent_parser],
+        help="Generate shell completion script (bash, fish, powershell, zsh)",
+    )
+    parser_completion.add_argument(
+        "shell",
+        choices=["bash", "fish", "powershell", "zsh"],
+        help="Target shell environment",
+    )
+
     args = parser.parse_args()
 
     if args.command == "install":
         handle_install(args, config)
-    elif args.command == "update":
+    elif args.command in ("update", "upgrade"):
         handle_update(args, config)
-    elif args.command == "remove":
+    elif args.command in ("remove", "uninstall", "rm"):
         handle_remove(args, config)
-    elif args.command == "list":
+    elif args.command in ("list", "ls"):
         handle_list(args, config)
     elif args.command == "search":
         handle_search(args, config)
     elif args.command in ("info", "show"):
         handle_info(args, config)
+    elif args.command == "clean":
+        handle_clean(args, config)
+    elif args.command == "config":
+        handle_config(args, config)
+    elif args.command == "completion":
+        handle_completion(args, config)
 
 
 if __name__ == "__main__":

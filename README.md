@@ -37,10 +37,12 @@ code-extensions <command> [options]
 ### Commands
 
 * `install`: Install extension(s) by ID (e.g. `publisher.name` or `publisher.name@version`).
-* `update`: Check, download, and install updates for installed extensions.
-* `list`: List installed extensions (with optional search query, quiet mode, or outdated filter).
+* `update` (or `upgrade`): Check, download, and install updates for installed extensions.
+* `list` (or `ls`): List installed extensions with optional filtering and update checks.
 * `search`: Search the VS Code Marketplace / Open VSX for extensions.
 * `info` (or `show`): Display detailed metadata and local installation status for an extension.
+* `clean`: Purge cached API response JSON files and temporary VSIX downloads.
+* `config`: View or modify global settings and extension-specific rules in `config.toml`.
 * `remove`: Remove installed extension(s) by ID or interactively select extensions to remove.
 
 ### 1. `install` Command
@@ -60,6 +62,7 @@ code-extensions install [extension-id...] [options]
 * `-d`, `--download-dir <path>`: Directory for downloading `.vsix` files.
 * `-y`, `--yes`: Non-interactive mode.
 * `-a`, `--min-release-age <age>`: Minimum release age threshold (e.g. `24h`, `3d`, `0`).
+* `--force`: Force re-installation even if the target version is already installed.
 
 ### 2. `update` Command
 
@@ -95,12 +98,11 @@ code-extensions search <query> [options]
 ```
 
 * Searches the VS Code Marketplace or Open VSX Registry for extensions.
-* Displays ID, version, display name, and short description. In interactive mode, prompts to select and install results directly.
+* Displays ID, version, display name, and short description. Launches an interactive TUI browser to inspect info or install search results directly.
 
 **Options**:
 * `-n`, `--max-results <N>`: Maximum number of search results (default: `15`).
 * `-q`, `--quiet`: Output raw extension IDs only (one per line, ideal for piping).
-* `-i`, `--interactive`: Interactively select extensions to install from search results.
 * `-p`, `--include-prerelease`: Include pre-release versions.
 * `-a`, `--min-release-age <age>`: Minimum release age threshold.
 
@@ -110,15 +112,65 @@ code-extensions search <query> [options]
 code-extensions info <extension-id>
 ```
 
-* Displays rich metadata for an extension (publisher, latest version, pricing, repository links, description, and local installation status).
+* Displays rich metadata for an extension (publisher, latest version, pricing, repository links, description, eligible version, and local installation status).
 
-### 5. `remove` Command
+### 6. `clean` Command
+
+```bash
+code-extensions clean
+```
+
+* Purges cached API response JSON files (`~/.cache/code_extensions/`) and removes temporary downloaded `.vsix` files.
+
+### 7. `config` Command
+
+```bash
+code-extensions config [list|get|set|unset] [key] [value]
+```
+
+* View, set, or unset configuration settings and per-extension rules directly in `config.toml`.
+
+**Examples**:
+```bash
+code-extensions config list
+code-extensions config set min_release_age 3d
+code-extensions config set code_binary codium
+code-extensions config set charliermarsh.ruff.min_release_age 12h
+code-extensions config set ms-python.python.ignore true
+code-extensions config get min_release_age
+code-extensions config unset charliermarsh.ruff.min_release_age
+```
+
+### 8. `completion` Command
+
+```bash
+code-extensions completion <shell>
+```
+
+* Generates tab completion scripts for **bash**, **fish**, **powershell**, or **zsh**.
+
+**Usage**:
+```bash
+# Fish shell (add to ~/.config/fish/config.fish)
+code-extensions completion fish | source
+
+# Bash shell (add to ~/.bashrc)
+eval "$(code-extensions completion bash)"
+
+# Zsh shell (add to ~/.zshrc)
+eval "$(code-extensions completion zsh)"
+
+# PowerShell (add to $PROFILE)
+code-extensions completion powershell | Out-String | Invoke-Expression
+```
+
+### 9. `remove` Command
 
 ```bash
 code-extensions remove [extension-id...] [options]
 ```
 
-* Removes specified extension(s).
+* Removes specified extension(s). Supports aliases `uninstall` and `rm`.
 * If no extension IDs are passed, launches an interactive TUI listing all installed extensions to select which ones to remove.
 
 **Options**:
