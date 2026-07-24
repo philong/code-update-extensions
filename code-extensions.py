@@ -545,7 +545,9 @@ CONFIG_OPTION_TYPES = {
     "open_vsx": bool,
 }
 
-EXT_OPTION_KEYS = frozenset({"ignore", "min_release_age", "skip_versions"})
+EXT_OPTION_KEYS = frozenset(
+    {"ignore", "min_release_age", "skip_versions", "include_prerelease"}
+)
 
 
 def coerce_config_value(val, expected_type):
@@ -614,6 +616,14 @@ def load_config():
                 norm_ext_cfg["ignore"] = val
             elif isinstance(val, str) and val.strip().lower() in ("true", "false"):
                 norm_ext_cfg["ignore"] = val.strip().lower() == "true"
+
+        for prerelease_key in ("include_prerelease", "include-prerelease"):
+            if prerelease_key in ext_data:
+                val = ext_data[prerelease_key]
+                if isinstance(val, bool):
+                    norm_ext_cfg["include_prerelease"] = val
+                elif isinstance(val, str) and val.strip().lower() in ("true", "false"):
+                    norm_ext_cfg["include_prerelease"] = val.strip().lower() == "true"
 
         for age_key in ("min_release_age", "min-release-age"):
             if age_key in ext_data:
@@ -834,6 +844,10 @@ def handle_config(args, config):
                 "Per-extension minimum release age override (e.g. '6h', '0')",
             ),
             ("ignore", "Exclude extension from automatic updates (true/false)"),
+            (
+                "include_prerelease",
+                "Allow pre-release versions for this extension (true/false)",
+            ),
             ("skip_versions", "List of version strings to skip (e.g. ['1.2.3'])"),
         ]
         for key, desc in ext_ref:
@@ -1190,6 +1204,7 @@ def query_marketplace_search(
 
         ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
         skipped_versions = ext_cfg.get("skip_versions", [])
+        eff_include_prerelease = ext_cfg.get("include_prerelease", include_prerelease)
         eff_min_age = min_release_age
         if "min_release_age" in ext_cfg:
             try:
@@ -1204,7 +1219,7 @@ def query_marketplace_search(
                 continue
             if skipped_versions and version_str in skipped_versions:
                 continue
-            if not include_prerelease and is_prerelease(ver_obj):
+            if not eff_include_prerelease and is_prerelease(ver_obj):
                 continue
             if vscode_version:
                 engine_constraint = get_engine_constraint(ver_obj)
@@ -1248,7 +1263,7 @@ def query_marketplace_search(
             all_versions = full_ext.get("versions", [])
             if all_versions:
                 raw_latest = all_versions[0].get("version", "unknown")
-                if not include_prerelease and is_prerelease(all_versions[0]):
+                if not eff_include_prerelease and is_prerelease(all_versions[0]):
                     eligible_version = "pre-release"
                     latest_version = raw_latest
                     is_held_back = True
@@ -1554,6 +1569,10 @@ def handle_install(args, config):
         full_id = f"{pub_name}.{ext_name}".lower()
 
         ext_cfg = extensions_config.get(full_id, {})
+        eff_include_prerelease = ext_cfg.get("include_prerelease", include_prerelease)
+        if getattr(args, "include_prerelease", False):
+            eff_include_prerelease = True
+
         eff_min_age = min_release_age
         eff_min_age_str = min_release_age_str
         if args.min_release_age is None and "min_release_age" in ext_cfg:
@@ -1571,7 +1590,7 @@ def handle_install(args, config):
                 continue
             if req_ver and v_str != req_ver:
                 continue
-            if not req_ver and not include_prerelease and is_prerelease(ver_obj):
+            if not req_ver and not eff_include_prerelease and is_prerelease(ver_obj):
                 continue
             if vscode_version:
                 engine_constraint = get_engine_constraint(ver_obj)
@@ -1756,6 +1775,9 @@ def check_updates(
         parsed_installed = parse_version(installed_ver)
         ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
         skipped_versions = ext_cfg.get("skip_versions", [])
+        eff_exclude_prerelease = exclude_prerelease
+        if "include_prerelease" in ext_cfg:
+            eff_exclude_prerelease = not ext_cfg["include_prerelease"]
 
         compatible_versions = []
         # The gallery returns versions newest-first, so the first version at or
@@ -1768,7 +1790,7 @@ def check_updates(
                 break
             if skipped_versions and version_str in skipped_versions:
                 continue
-            if exclude_prerelease and is_prerelease(ver_obj):
+            if eff_exclude_prerelease and is_prerelease(ver_obj):
                 continue
             if vscode_version:
                 engine_constraint = get_engine_constraint(ver_obj)
@@ -2813,6 +2835,10 @@ def handle_info(args, config):
 
     ext_cfg = config.get("extensions", {}).get(full_id, {})
     skipped_versions = ext_cfg.get("skip_versions", [])
+    eff_include_prerelease = ext_cfg.get("include_prerelease", include_prerelease)
+    if getattr(args, "include_prerelease", None):
+        eff_include_prerelease = True
+
     eff_min_age = min_release_age
     if getattr(args, "min_release_age", None) is None and "min_release_age" in ext_cfg:
         try:
@@ -2830,7 +2856,7 @@ def handle_info(args, config):
             continue
         if skipped_versions and v_str in skipped_versions:
             continue
-        if not include_prerelease and is_prerelease(ver_obj):
+        if not eff_include_prerelease and is_prerelease(ver_obj):
             continue
         if vscode_version:
             engine_constraint = get_engine_constraint(ver_obj)
