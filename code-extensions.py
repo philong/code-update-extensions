@@ -561,7 +561,7 @@ def coerce_config_value(val, expected_type):
 
 
 def load_config():
-    config_path = os.path.expanduser("~/.config/code-extensions/config.toml")
+    config_path = get_default_config_path()
     config = {"extensions": {}}
     if not os.path.exists(config_path):
         return config
@@ -1126,7 +1126,7 @@ def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
 def query_marketplace_search(
     query_text,
     max_results=15,
-    target_platform="universal",
+    target_platform=None,
     vscode_version=None,
     include_prerelease=False,
     min_release_age=None,
@@ -1136,6 +1136,9 @@ def query_marketplace_search(
     cleanup_stale_cache()
     if not query_text:
         return []
+
+    if target_platform is None:
+        target_platform = get_local_target_platform()
 
     payload = {
         "filters": [
@@ -1163,6 +1166,16 @@ def query_marketplace_search(
         return []
 
     extensions = results[0].get("extensions", [])
+    if not extensions:
+        return []
+
+    ext_ids = [
+        f"{ext.get('publisher', {}).get('publisherName', '')}.{ext.get('extensionName', '')}".lower()
+        for ext in extensions
+        if ext.get("publisher", {}).get("publisherName") and ext.get("extensionName")
+    ]
+    ext_details_map = query_marketplace_extensions(ext_ids, service_url=service_url)
+
     search_results = []
     for ext in extensions:
         pub_name = ext.get("publisher", {}).get("publisherName", "")
@@ -1170,6 +1183,8 @@ def query_marketplace_search(
         full_id = f"{pub_name}.{ext_name}".lower()
         display_name = ext.get("displayName") or ext_name
         description = ext.get("shortDescription") or ""
+
+        full_ext = ext_details_map.get(full_id, ext)
 
         ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
         skipped_versions = ext_cfg.get("skip_versions", [])
@@ -1181,7 +1196,7 @@ def query_marketplace_search(
                 pass
 
         compatible_versions = []
-        for ver_obj in ext.get("versions", []):
+        for ver_obj in full_ext.get("versions", []):
             version_str = ver_obj.get("version")
             if not version_str:
                 continue
@@ -1228,7 +1243,7 @@ def query_marketplace_search(
                 eligible_version = "held back"
                 is_held_back = True
         else:
-            all_versions = ext.get("versions", [])
+            all_versions = full_ext.get("versions", [])
             if all_versions:
                 raw_latest = all_versions[0].get("version", "unknown")
                 if not include_prerelease and is_prerelease(all_versions[0]):
@@ -1643,16 +1658,19 @@ def handle_install(args, config):
         installed_ver = installed_exts.get(full_id)
         force = getattr(args, "force", False)
 
-        if (
-            installed_ver
-            and parse_version(installed_ver) == parse_version(target_version)
-            and not force
-            and not req_ver
-        ):
-            print(
-                f"  {Colors.GREEN}✓ Extension '{full_id}' is already installed at version v{installed_ver} (latest eligible version). Skipping.{Colors.ENDC}"
-            )
-            continue
+        if installed_ver and not force and not req_ver:
+            parsed_installed = parse_version(installed_ver)
+            parsed_target = parse_version(target_version)
+            if parsed_installed == parsed_target:
+                print(
+                    f"  {Colors.GREEN}✓ Extension '{full_id}' is already installed at version v{installed_ver} (latest eligible version). Skipping.{Colors.ENDC}"
+                )
+                continue
+            elif parsed_installed > parsed_target:
+                print(
+                    f"  {Colors.GREEN}✓ Extension '{full_id}' is already installed at newer version v{installed_ver} (eligible version is v{target_version}). Skipping.{Colors.ENDC}"
+                )
+                continue
 
         target_plat = selected_ver_obj.get("targetPlatform") or "universal"
         url = get_vsix_download_url(
@@ -1679,7 +1697,13 @@ def handle_install(args, config):
             f"Installing {Colors.CYAN}{full_id}{Colors.ENDC} v{Colors.GREEN}{target_version}{Colors.ENDC}..."
         )
         try:
-            run_code_cmd(code_binary + ["--install-extension", filepath], retries=0)
+            cmd = code_binary + ["--install-extension", filepath]
+            if force or (
+                installed_ver
+                and parse_version(installed_ver) > parse_version(target_version)
+            ):
+                cmd.append("--force")
+            run_code_cmd(cmd, retries=0)
             print(f"  {Colors.GREEN}✓{Colors.ENDC} Installed successfully.")
         except subprocess.CalledProcessError as e:
             print(

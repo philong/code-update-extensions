@@ -20,7 +20,7 @@ A Python script to install, update, list, search, and remove VS Code extensions 
 Ensure you have Python 3 installed. Make the script executable and run:
 
 ```bash
-chmod +x code_extensions.py
+chmod +x code-extensions.py
 ./code-extensions --help
 ```
 
@@ -120,7 +120,7 @@ code-extensions info <extension-id>
 code-extensions clean
 ```
 
-* Purges cached API response JSON files (`~/.cache/code_extensions/`) and removes temporary downloaded `.vsix` files.
+* Purges cached API response JSON files (`~/.cache/code-extensions/`) and removes temporary downloaded `.vsix` files.
 
 ### 7. `config` Command
 
@@ -180,7 +180,7 @@ code-extensions remove [extension-id...] [options]
 
 ## Configuration File
 
-Set defaults and per-extension rules in `~/.config/code_extensions/config.toml`:
+Set defaults and per-extension rules in `~/.config/code-extensions/config.toml`:
 
 ```toml
 min-release-age = "12h"        # Default release age buffer (e.g., 24h, 3d, 0)
