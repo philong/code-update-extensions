@@ -340,7 +340,7 @@ def get_cache_dir():
     # Per-user cache dir: /tmp is world-writable with predictable filenames,
     # which would let another local user poison cached marketplace responses.
     base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    cache_dir = os.path.join(base, "code_update_extensions")
+    cache_dir = os.path.join(base, "code-extensions")
     try:
         os.makedirs(cache_dir, mode=0o700, exist_ok=True)
     except Exception:
@@ -1226,7 +1226,7 @@ def coerce_config_value(val, expected_type):
 
 
 def load_config():
-    config_path = os.path.expanduser("~/.config/code_update_extensions/config.toml")
+    config_path = os.path.expanduser("~/.config/code-extensions/config.toml")
     config = {"extensions": {}}
     if not os.path.exists(config_path):
         return config
@@ -1354,7 +1354,7 @@ def resolve_option(args_val, config, key, default):
 def main():
     parser = argparse.ArgumentParser(
         description="Check, download, and install VS Code extension updates.",
-        epilog="Defaults for all options can be set in ~/.config/code_update_extensions/config.toml; command line flags override them.",
+        epilog="Defaults for all options can be set in ~/.config/code-extensions/config.toml; command line flags override them.",
     )
     parser.add_argument(
         "-p",
