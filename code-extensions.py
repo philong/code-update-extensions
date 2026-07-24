@@ -2715,9 +2715,18 @@ def handle_info(args, config):
     description = ext_obj.get("shortDescription") or "No description provided."
 
     versions = ext_obj.get("versions", [])
-    latest_ver = versions[0].get("version", "unknown") if versions else "unknown"
-    last_updated = versions[0].get("lastUpdated", "") if versions else ""
-    release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
+
+    include_prerelease = resolve_option(
+        getattr(args, "include_prerelease", None), config, "include_prerelease", False
+    )
+    no_code_version_check = resolve_option(
+        getattr(args, "no_code_version_check", None),
+        config,
+        "no_code_version_check",
+        False,
+    )
+    vscode_version = None if no_code_version_check else get_vscode_version(code_binary)
+    target_platform = get_local_target_platform()
 
     min_release_age_str = resolve_option(
         getattr(args, "min_release_age", None), config, "min_release_age", "24h"
@@ -2728,6 +2737,7 @@ def handle_info(args, config):
         min_release_age = datetime.timedelta(hours=24)
 
     ext_cfg = config.get("extensions", {}).get(full_id, {})
+    skipped_versions = ext_cfg.get("skip_versions", [])
     eff_min_age = min_release_age
     if getattr(args, "min_release_age", None) is None and "min_release_age" in ext_cfg:
         try:
@@ -2735,23 +2745,61 @@ def handle_info(args, config):
         except ValueError:
             pass
 
+    # Mirror the install/search eligibility filter: only versions compatible
+    # with the host VS Code engine and platform/architecture (and not skipped
+    # or pre-release) are candidates, then the min-release-age gate applies.
+    compatible_versions = []
+    for ver_obj in versions:
+        v_str = ver_obj.get("version")
+        if not v_str:
+            continue
+        if skipped_versions and v_str in skipped_versions:
+            continue
+        if not include_prerelease and is_prerelease(ver_obj):
+            continue
+        if vscode_version:
+            engine_constraint = get_engine_constraint(ver_obj)
+            if engine_constraint and not is_engine_compatible(
+                vscode_version, engine_constraint
+            ):
+                continue
+        ver_platform = ver_obj.get("targetPlatform")
+        if ver_platform is None or ver_platform.lower() in (
+            "universal",
+            target_platform.lower(),
+        ):
+            compatible_versions.append(ver_obj)
+
+    compatible_versions.sort(key=lambda x: parse_version(x["version"]), reverse=True)
+
+    latest_ver = "unknown"
     eligible_ver = "unknown"
     is_held_back = False
+    latest_ver_obj = None
 
-    if versions:
-        for ver_obj in versions:
-            v_str = ver_obj.get("version")
-            if not v_str:
-                continue
+    if compatible_versions:
+        latest_ver_obj = compatible_versions[0]
+        latest_ver = latest_ver_obj["version"]
+        for ver_obj in compatible_versions:
             if not released_long_enough(ver_obj, eff_min_age):
                 continue
-            eligible_ver = v_str
-            if v_str != latest_ver:
+            eligible_ver = ver_obj["version"]
+            if eligible_ver != latest_ver:
                 is_held_back = True
             break
         else:
             eligible_ver = "held back"
             is_held_back = True
+    elif versions:
+        # Nothing compatible with this host; still report the newest published
+        # version so the user sees what exists, but flag it as ineligible.
+        latest_ver_obj = versions[0]
+        latest_ver = latest_ver_obj.get("version", "unknown")
+        eligible_ver = "incompatible"
+        is_held_back = True
+
+    last_updated = latest_ver_obj.get("lastUpdated", "") if latest_ver_obj else ""
+    release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
 
     categories = ext_obj.get("categories", [])
     cat_str = ", ".join(categories) if categories else "None"
@@ -2764,7 +2812,7 @@ def handle_info(args, config):
         else f"{Colors.YELLOW}Not installed{Colors.ENDC}"
     )
 
-    props = versions[0].get("properties", []) if versions else []
+    props = latest_ver_obj.get("properties", []) if latest_ver_obj else []
     repo_url = None
     homepage_url = None
     pricing = "Free"
@@ -2784,9 +2832,17 @@ def handle_info(args, config):
     print(f"  {Colors.BOLD}Publisher:{Colors.ENDC}   {pub_disp} ({pub_name})")
     print(f"  {Colors.BOLD}Latest Ver:{Colors.ENDC}  v{latest_ver} ({release_date})")
     if is_held_back:
-        el_str = f"v{eligible_ver}" if eligible_ver != "held back" else "held back"
+        if eligible_ver == "incompatible":
+            el_str = "none"
+            note = "no version compatible with this VS Code/platform"
+        elif eligible_ver == "held back":
+            el_str = "held back"
+            note = "held back by min-release-age policy"
+        else:
+            el_str = f"v{eligible_ver}"
+            note = "held back by min-release-age policy"
         print(
-            f"  {Colors.BOLD}Eligible Ver:{Colors.ENDC} {Colors.YELLOW}{el_str}{Colors.ENDC} ({Colors.YELLOW}held back by min-release-age policy{Colors.ENDC})"
+            f"  {Colors.BOLD}Eligible Ver:{Colors.ENDC} {Colors.YELLOW}{el_str}{Colors.ENDC} ({Colors.YELLOW}{note}{Colors.ENDC})"
         )
     else:
         print(
