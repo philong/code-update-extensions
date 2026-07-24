@@ -2025,6 +2025,52 @@ def select_updates(updates):
         sys.exit(0)
 
 
+def resolve_update_targets(specs, installed_exts):
+    """Resolve user-supplied specs to a subset of installed extensions.
+
+    Accepts full IDs (``publisher.name``) or partial names (matched as a
+    case-insensitive substring against installed IDs, mirroring ``info``).
+    Returns a dict of the matched installed extensions; unresolved or
+    ambiguous specs are reported and skipped.
+    """
+    resolved = {}
+    for spec in specs:
+        s = spec.strip().lower()
+        if "@" in s:
+            s = s.split("@")[0]
+        if not s:
+            continue
+        if s in installed_exts:
+            resolved[s] = installed_exts[s]
+            continue
+        matches = sorted(eid for eid in installed_exts if s in eid)
+        # Disambiguate a partial that hits several IDs by preferring one whose
+        # extension name (the part after the publisher) matches exactly, e.g.
+        # 'python' -> 'ms-python.python' rather than 'ms-python.debugpy'.
+        if len(matches) > 1:
+            exact_name = [eid for eid in matches if eid.split(".", 1)[-1] == s]
+            if len(exact_name) == 1:
+                matches = exact_name
+        if len(matches) == 1:
+            match = matches[0]
+            print(
+                f"{Colors.YELLOW}Notice: '{spec}' is not a full extension ID. Updating installed match '{match}'.{Colors.ENDC}"
+            )
+            resolved[match] = installed_exts[match]
+        elif len(matches) > 1:
+            print(
+                f"{Colors.YELLOW}Notice: '{spec}' matches multiple installed extensions; be more specific:{Colors.ENDC}"
+            )
+            for m in matches:
+                print(f"    {m}")
+        else:
+            print(
+                f"{Colors.RED}✗ '{spec}' is not installed; skipping.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+    return resolved
+
+
 def handle_update(args, config):
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
@@ -2057,7 +2103,15 @@ def handle_update(args, config):
         print("No extensions found installed.")
         return
 
-    print(f"Found {len(installed_exts)} extensions installed.")
+    target_specs = list(getattr(args, "extensions", None) or [])
+    if target_specs:
+        installed_exts = resolve_update_targets(target_specs, installed_exts)
+        if not installed_exts:
+            print("No matching installed extensions to update.")
+            return
+        print(f"Checking {len(installed_exts)} selected extension(s) for updates.")
+    else:
+        print(f"Found {len(installed_exts)} extensions installed.")
     print(
         f"{Colors.BLUE}Checking updates (including pre-releases: {include_prerelease})...{Colors.ENDC}"
     )
@@ -2946,7 +3000,7 @@ complete -c code-extensions -n "__fish_seen_subcommand_from search" -s q -l quie
 complete -c code-extensions -n "__fish_seen_subcommand_from search" -s p -l include-prerelease -d "Allow pre-release versions"
 complete -c code-extensions -n "__fish_seen_subcommand_from search" -s a -l min-release-age -d "Minimum release age threshold" -r
 
-complete -c code-extensions -n "__fish_seen_subcommand_from remove uninstall rm info show" -a "(code-extensions list -q 2>/dev/null)"
+complete -c code-extensions -n "__fish_seen_subcommand_from remove uninstall rm info show update upgrade" -a "(code-extensions list -q 2>/dev/null)"
 """
 
 BASH_COMPLETION_SCRIPT = """# Bash completion script for code-extensions
@@ -2993,7 +3047,13 @@ _code_extensions_completion() {
             COMPREPLY=( $(compgen -W "-f --file -p --include-prerelease -n --no-code-version-check -d --download-dir -y --yes -a --min-release-age --force -h --help" -- "$cur") )
             ;;
         update|upgrade)
-            COMPREPLY=( $(compgen -W "-p --include-prerelease -n --no-code-version-check -d --download-dir -y --yes -a --min-release-age -h --help" -- "$cur") )
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=( $(compgen -W "-p --include-prerelease -n --no-code-version-check -d --download-dir -y --yes -a --min-release-age -h --help" -- "$cur") )
+            else
+                local installed
+                installed=$(code-extensions list -q 2>/dev/null)
+                COMPREPLY=( $(compgen -W "$installed" -- "$cur") )
+            fi
             ;;
         list|ls)
             COMPREPLY=( $(compgen -W "-q --quiet -u --outdated -h --help" -- "$cur") )
@@ -3063,7 +3123,7 @@ _code_extensions() {
                 completion)
                     _values 'shell' $shells
                     ;;
-                remove|uninstall|rm|info|show)
+                remove|uninstall|rm|info|show|update|upgrade)
                     local -a installed
                     installed=($(code-extensions list -q 2>/dev/null))
                     _values 'installed extensions' $installed
@@ -3132,7 +3192,7 @@ Register-ArgumentCompleter -Native -CommandName 'code-extensions' -ScriptBlock {
                 }
             }
         }
-        { $_ -in @('remove', 'uninstall', 'rm', 'info', 'show') } {
+        { $_ -in @('remove', 'uninstall', 'rm', 'info', 'show', 'update', 'upgrade') } {
             $installed = code-extensions list -q 2>$null
             $installed | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
                 [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
@@ -3257,6 +3317,11 @@ def main():
         aliases=["upgrade"],
         parents=[parent_parser],
         help="Check, download, and install updates for installed extensions",
+    )
+    parser_update.add_argument(
+        "extensions",
+        nargs="*",
+        help="Extension ID(s) or partial name(s) to update (default: all installed)",
     )
     parser_update.add_argument(
         "-p",

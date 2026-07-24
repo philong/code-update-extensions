@@ -67,10 +67,11 @@ code-extensions install [extension-id...] [options]
 ### 2. `update` Command
 
 ```bash
-code-extensions update [options]
+code-extensions update [extensions...] [options]
 ```
 
 * Scans installed extensions, queries marketplace for updates, and launches interactive TUI selection (or auto-installs if `-y`).
+* Optionally limit the check to one or more extensions by passing full IDs (e.g. `ms-python.python`) or partial names (e.g. `python`, resolved against installed extensions like `info`). Without arguments, all installed extensions are checked.
 
 **Options**:
 * `-p`, `--include-prerelease`: Include pre-release versions in update check.
@@ -230,6 +231,10 @@ skip-versions = ["0.39.0"]
 
 # Auto-upgrade all extensions non-interactively
 ./code-extensions update -y
+
+# Update a single extension (full ID or partial name)
+./code-extensions update ms-python.python
+./code-extensions update python -y
 
 # Remove extension directly
 ./code-extensions remove ms-python.python
