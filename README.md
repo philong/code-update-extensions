@@ -1,13 +1,13 @@
 # VS Code Extension Manager (`code-extensions`)
 
-A Python script to install, update, list, and remove VS Code extensions directly from the VS Code Marketplace or Open VSX Registry. It features an interactive terminal user interface (TUI) for selecting updates or extensions to remove, along with security controls to mitigate supply-chain attacks.
+A Python script to install, update, list, search, and remove VS Code extensions directly from the VS Code Marketplace or Open VSX Registry. It features an interactive terminal user interface (TUI) for selecting updates, search results, or extensions to remove, along with security controls to mitigate supply-chain attacks.
 
 ## Features
 
-- **Subcommands**: Supports `install`, `update`, `list`, and `remove` commands.
+- **Subcommands**: Supports `install`, `update`, `list`, `search`, and `remove` commands.
 - **Direct VS Code Marketplace API Integration**: Queries extension metadata and package assets directly from the marketplace gallery API.
 - **Supply-Chain Security Mitigation**: Holds back releases newer than a specified age (default `24h`) across both `install` and `update` commands to ensure packages have not been compromised or flag-analyzed.
-- **Interactive Terminal UI**: Scrollable interactive menus in your terminal to toggle, select, and review updates or removals.
+- **Interactive Terminal UI**: Scrollable interactive menus in your terminal to toggle, select, and review updates, search results, or removals.
 - **Auto Platform & Architecture Resolution**: Detects and downloads platform-specific `.vsix` packages (e.g. `linux-x64`, `darwin-arm64`, `win32-x64`).
 - **VS Code Version Compatibility Checks**: Verifies host VS Code version engine requirements so you never install incompatible extensions.
 - **Alternative VS Code Extension Registries & Open VSX**: Query extensions from Open VSX or custom self-hosted VS Code Extension Galleries.
@@ -39,18 +39,22 @@ code-extensions <command> [options]
 * `install`: Install extension(s) by ID (e.g. `publisher.name` or `publisher.name@version`).
 * `update`: Check, download, and install updates for installed extensions.
 * `list`: List installed extensions (with optional search query, quiet mode, or outdated filter).
+* `search`: Search the VS Code Marketplace / Open VSX for extensions.
+* `info` (or `show`): Display detailed metadata and local installation status for an extension.
 * `remove`: Remove installed extension(s) by ID or interactively select extensions to remove.
 
 ### 1. `install` Command
 
 ```bash
-code-extensions install <extension-id...> [options]
+code-extensions install [extension-id...] [options]
 ```
 
 * Installs specified extension(s). Supports explicit version parameter (e.g., `ms-python.python@2024.1.0`).
+* Supports batch importing extensions from a text file using `-f` / `--file`.
 * Respects `min-release-age` policy. If the latest release is too fresh, automatically selects the latest age-eligible version, or warns before proceeding.
 
 **Options**:
+* `-f`, `--file <path>`: Text file containing extension IDs to install (one per line).
 * `-p`, `--include-prerelease`: Allow pre-release versions.
 * `-n`, `--no-code-version-check`: Disable VS Code host compatibility check.
 * `-d`, `--download-dir <path>`: Directory for downloading `.vsix` files.
@@ -84,7 +88,31 @@ code-extensions list [query] [options]
 * `-q`, `--quiet`: Output raw extension IDs only (one per line, ideal for scripting).
 * `-u`, `--outdated`: List only extensions that have updates available.
 
-### 4. `remove` Command
+### 4. `search` Command
+
+```bash
+code-extensions search <query> [options]
+```
+
+* Searches the VS Code Marketplace or Open VSX Registry for extensions.
+* Displays ID, version, display name, and short description. In interactive mode, prompts to select and install results directly.
+
+**Options**:
+* `-n`, `--max-results <N>`: Maximum number of search results (default: `15`).
+* `-q`, `--quiet`: Output raw extension IDs only (one per line, ideal for piping).
+* `-i`, `--interactive`: Interactively select extensions to install from search results.
+* `-p`, `--include-prerelease`: Include pre-release versions.
+* `-a`, `--min-release-age <age>`: Minimum release age threshold.
+
+### 5. `info` / `show` Command
+
+```bash
+code-extensions info <extension-id>
+```
+
+* Displays rich metadata for an extension (publisher, latest version, pricing, repository links, description, and local installation status).
+
+### 5. `remove` Command
 
 ```bash
 code-extensions remove [extension-id...] [options]
@@ -124,6 +152,12 @@ skip-versions = ["0.39.0"]
 ## Examples
 
 ```bash
+# Search marketplace for extensions
+./code-extensions search "python debugger"
+
+# Pipe top search result directly into install
+./code-extensions search "ruff" -q -n 1 | xargs ./code-extensions install -y
+
 # Install extensions
 ./code-extensions install ms-python.python golang.go
 

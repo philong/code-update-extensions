@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from functools import lru_cache
@@ -761,6 +762,228 @@ def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
     return extension_map
 
 
+def query_marketplace_search(
+    query_text,
+    max_results=15,
+    target_platform="universal",
+    vscode_version=None,
+    include_prerelease=False,
+    min_release_age=None,
+    extensions_config=None,
+    service_url=DEFAULT_SERVICE_URL,
+):
+    cleanup_stale_cache()
+    if not query_text:
+        return []
+
+    payload = {
+        "filters": [
+            {
+                "criteria": [
+                    {"filterType": 8, "value": "Microsoft.VisualStudio.Code"},
+                    {"filterType": 10, "value": query_text},
+                ],
+                "pageNumber": 1,
+                "pageSize": max_results,
+                "sortBy": 0,
+                "sortOrder": 0,
+            }
+        ],
+        "assetTypes": [],
+        "flags": 914,
+    }
+
+    req_data = json.dumps(payload).encode("utf-8")
+    cache_key_data = {"service_url": service_url, "payload": payload}
+    payload_hash = hashlib.sha256(
+        json.dumps(cache_key_data, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    cache_file = os.path.join(get_cache_dir(), f"vscode_ext_cache_{payload_hash}.json")
+
+    resp_data = None
+    if os.path.exists(cache_file):
+        try:
+            if time.time() - os.path.getmtime(cache_file) < 3600:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    resp_data = json.load(f)
+        except Exception:
+            pass
+
+    if resp_data is None:
+        query_endpoint = f"{service_url.rstrip('/')}/extensionquery"
+        if "api-version=" not in query_endpoint:
+            query_endpoint += "?api-version=7.2-preview.1"
+
+        req = urllib.request.Request(
+            query_endpoint,
+            data=req_data,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json; api-version=7.2-preview.1",
+            },
+            method="POST",
+        )
+
+        max_retries = 3
+        backoff = 2.0
+        for attempt in range(max_retries + 1):
+            retry_reason = None
+            retry_after = None
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    resp_data = json.loads(response.read().decode("utf-8"))
+                try:
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        json.dump(resp_data, f)
+                except Exception:
+                    pass
+                break
+            except urllib.error.HTTPError as e:
+                err = e
+                if 500 <= e.code < 600:
+                    retry_reason = f"returned HTTP status {e.code}"
+                elif e.code == 429:
+                    retry_reason = "rate limited (HTTP 429)"
+                    ra = e.headers.get("Retry-After")
+                    if ra and ra.strip().isdigit():
+                        retry_after = float(ra.strip())
+            except (urllib.error.URLError, TimeoutError) as e:
+                err = e
+                reason = str(getattr(e, "reason", e)).lower()
+                if (
+                    isinstance(e, TimeoutError)
+                    or "timed out" in reason
+                    or "timeout" in reason
+                ):
+                    retry_reason = "request timed out"
+            except Exception as e:
+                err = e
+
+            if retry_reason and attempt < max_retries:
+                delay = retry_after if retry_after is not None else backoff
+                print(
+                    f"{Colors.YELLOW}Marketplace API {retry_reason}. Retrying in {delay}s... (attempt {attempt + 1}/{max_retries}){Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                backoff *= 2.0
+            else:
+                print(
+                    f"{Colors.RED}Failed to query marketplace API: {err}{Colors.ENDC}",
+                    file=sys.stderr,
+                )
+                break
+
+    if not resp_data:
+        return []
+
+    results = resp_data.get("results", [])
+    if not results:
+        return []
+
+    extensions = results[0].get("extensions", [])
+    search_results = []
+    for ext in extensions:
+        pub_name = ext.get("publisher", {}).get("publisherName", "")
+        ext_name = ext.get("extensionName", "")
+        full_id = f"{pub_name}.{ext_name}".lower()
+        display_name = ext.get("displayName") or ext_name
+        description = ext.get("shortDescription") or ""
+
+        ext_cfg = extensions_config.get(full_id, {}) if extensions_config else {}
+        skipped_versions = ext_cfg.get("skip_versions", [])
+        eff_min_age = min_release_age
+        if "min_release_age" in ext_cfg:
+            try:
+                eff_min_age = parse_age_threshold(ext_cfg["min_release_age"])
+            except ValueError:
+                pass
+
+        compatible_versions = []
+        for ver_obj in ext.get("versions", []):
+            version_str = ver_obj.get("version")
+            if not version_str:
+                continue
+            if skipped_versions and version_str in skipped_versions:
+                continue
+            if not include_prerelease and is_prerelease(ver_obj):
+                continue
+            if vscode_version:
+                engine_constraint = get_engine_constraint(ver_obj)
+                if engine_constraint and not is_engine_compatible(
+                    vscode_version, engine_constraint
+                ):
+                    continue
+            ver_platform = ver_obj.get("targetPlatform")
+            if ver_platform is None or ver_platform.lower() in (
+                "universal",
+                target_platform.lower(),
+            ):
+                compatible_versions.append(ver_obj)
+
+        latest_version = "unknown"
+        eligible_version = "unknown"
+        is_held_back = False
+
+        if compatible_versions:
+            compatible_versions.sort(
+                key=lambda x: parse_version(x["version"]), reverse=True
+            )
+            latest_ver_obj = compatible_versions[0]
+            latest_version = latest_ver_obj["version"]
+
+            eligible_ver_obj = None
+            for ver_obj in compatible_versions:
+                if eff_min_age and eff_min_age > datetime.timedelta(0):
+                    last_updated = ver_obj.get("lastUpdated")
+                    if last_updated:
+                        try:
+                            cleaned_ts = (
+                                last_updated[:-1] + "+00:00"
+                                if last_updated.endswith("Z")
+                                else last_updated
+                            )
+                            release_dt = datetime.datetime.fromisoformat(cleaned_ts)
+                            now = datetime.datetime.now(datetime.timezone.utc)
+                            if now - release_dt < eff_min_age:
+                                continue
+                        except Exception:
+                            pass
+                eligible_ver_obj = ver_obj
+                break
+
+            if eligible_ver_obj:
+                eligible_version = eligible_ver_obj["version"]
+                if eligible_ver_obj != latest_ver_obj:
+                    is_held_back = True
+            else:
+                eligible_version = "held back"
+                is_held_back = True
+        else:
+            all_versions = ext.get("versions", [])
+            if all_versions:
+                raw_latest = all_versions[0].get("version", "unknown")
+                if not include_prerelease and is_prerelease(all_versions[0]):
+                    eligible_version = "pre-release"
+                    latest_version = raw_latest
+                    is_held_back = True
+
+        search_results.append(
+            {
+                "id": full_id,
+                "publisher": pub_name,
+                "name": ext_name,
+                "displayName": display_name,
+                "description": description,
+                "latest": latest_version,
+                "eligible": eligible_version,
+                "is_held_back": is_held_back,
+            }
+        )
+
+    return search_results
+
+
 def download_vsix(url, filepath):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     show_progress = sys.stdout.isatty()
@@ -876,15 +1099,50 @@ def get_key():
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def display_width(text):
+    clean_text = ansi_escape.sub("", str(text))
+    w = 0
+    for ch in clean_text:
+        if unicodedata.east_asian_width(ch) in ("F", "W"):
+            w += 2
+        else:
+            w += 1
+    return w
+
+
 def truncate(text, width):
     text = str(text)
     if width <= 0:
         return ""
-    if len(text) <= width:
+    if display_width(text) <= width:
         return text
-    if width == 1:
-        return text[:1]
-    return text[: width - 1] + "…"
+
+    current_w = 0
+    chars = []
+    for ch in text:
+        ch_w = 2 if unicodedata.east_asian_width(ch) in ("F", "W") else 1
+        if current_w + ch_w > width:
+            while chars and (current_w + 1 > width):
+                popped = chars.pop()
+                current_w -= (
+                    2 if unicodedata.east_asian_width(popped) in ("F", "W") else 1
+                )
+            chars.append("…")
+            break
+        chars.append(ch)
+        current_w += ch_w
+    return "".join(chars)
+
+
+def fit_column(text, width):
+    t = truncate(text, width)
+    dw = display_width(t)
+    if dw < width:
+        return t + " " * (width - dw)
+    return t
 
 
 def prompt_yes_no(question, default=False):
@@ -933,8 +1191,38 @@ def handle_install(args, config):
     target_platform = get_local_target_platform()
     extensions_config = config.get("extensions", {})
 
+    target_specs = list(args.extensions or [])
+    file_option = getattr(args, "file", None)
+    if file_option:
+        file_path = os.path.expanduser(file_option)
+        if not os.path.isfile(file_path):
+            print(
+                f"{Colors.RED}Error: File '{file_option}' not found.{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        target_specs.append(line)
+        except Exception as e:
+            print(
+                f"{Colors.RED}Error reading file '{file_option}': {e}{Colors.ENDC}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if not target_specs:
+        print(
+            f"{Colors.RED}Error: No extension ID(s) provided. Specify extension ID(s) or pass -f/--file.{Colors.ENDC}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     parsed_targets = []
-    for spec in args.extensions:
+    for spec in target_specs:
         spec = spec.strip()
         if "@" in spec:
             ext_id, req_ver = spec.rsplit("@", 1)
@@ -1310,22 +1598,22 @@ def check_updates(
 
 def print_updates_table(updates):
     print(
-        f"{Colors.BOLD}{'Extension ID':<45} {'Installed':<12} {'Eligible':<12} {'Latest':<12} {'Release Date':<15} {'Platform':<12}{Colors.ENDC}"
+        f"{Colors.BOLD}{fit_column('Extension ID', 45)} {fit_column('Installed', 12)} {fit_column('Eligible', 12)} {fit_column('Latest', 12)} {fit_column('Release Date', 15)} {fit_column('Platform', 12)}{Colors.ENDC}"
     )
     print("-" * 115)
     for update in updates:
         eligible_str = (
-            f"{Colors.GREEN}{update['eligible']:<12}{Colors.ENDC}"
+            f"{Colors.GREEN}{fit_column(update['eligible'], 12)}{Colors.ENDC}"
             if update["eligible"]
-            else f"{Colors.YELLOW}{'held back':<12}{Colors.ENDC}"
+            else f"{Colors.YELLOW}{fit_column('held back', 12)}{Colors.ENDC}"
         )
         print(
-            f"{Colors.CYAN}{update['id']:<45}{Colors.ENDC} "
-            f"{Colors.YELLOW}{update['installed']:<12}{Colors.ENDC} "
+            f"{Colors.CYAN}{fit_column(update['id'], 45)}{Colors.ENDC} "
+            f"{Colors.YELLOW}{fit_column(update['installed'], 12)}{Colors.ENDC} "
             f"{eligible_str} "
-            f"{Colors.BLUE}{update['latest']:<12}{Colors.ENDC} "
-            f"{update['latest_release_date']:<15} "
-            f"{update['eligible_platform'] or update['latest_platform']:<12}"
+            f"{Colors.BLUE}{fit_column(update['latest'], 12)}{Colors.ENDC} "
+            f"{fit_column(update['latest_release_date'], 15)} "
+            f"{fit_column(update['eligible_platform'] or update['latest_platform'], 12)}"
         )
 
 
@@ -1339,11 +1627,10 @@ def select_updates(updates):
     top = 0
 
     W_VER, W_DATE, W_PLAT = 12, 12, 12
-    OVERHEAD = 6 + 1 + (W_VER + 1) * 3 + (W_DATE + 1) + W_PLAT
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+    OVERHEAD = 6 + 1 + (W_VER + 1) * 3 + (W_DATE + 1) + W_PLAT + 1
 
     def visual_len(s):
-        return len(ansi_escape.sub("", s))
+        return display_width(s)
 
     first_frame = True
     prev_lines = 0
@@ -1370,8 +1657,8 @@ def select_updates(updates):
                 f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Esc/Ctrl+C=cancel{Colors.ENDC}"
             )
             out.append(
-                f"{Colors.BOLD}{'':6}{'Extension ID':<{id_w}} {'Installed':<{W_VER}} "
-                f"{'Eligible':<{W_VER}} {'Latest':<{W_VER}} {'Release':<{W_DATE}} {'Platform':<{W_PLAT}}{Colors.ENDC}"
+                f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Installed', W_VER)} "
+                f"{fit_column('Eligible', W_VER)} {fit_column('Latest', W_VER)} {fit_column('Release', W_DATE)} {fit_column('Platform', W_PLAT)}{Colors.ENDC}"
             )
             out.append("-" * min(cols, row_width))
 
@@ -1380,17 +1667,19 @@ def select_updates(updates):
                 prefix = ">" if i == cursor_idx else " "
                 if update["eligible"]:
                     mark = f"{Colors.GREEN}x{Colors.ENDC}" if selected[i] else " "
-                    eligible_str = f"{Colors.GREEN}{truncate(update['eligible'], W_VER):<{W_VER}}{Colors.ENDC}"
+                    eligible_str = f"{Colors.GREEN}{fit_column(update['eligible'], W_VER)}{Colors.ENDC}"
                 else:
                     mark = f"{Colors.YELLOW}!{Colors.ENDC}" if selected[i] else " "
-                    eligible_str = f"{Colors.YELLOW}{'held back':<{W_VER}}{Colors.ENDC}"
+                    eligible_str = (
+                        f"{Colors.YELLOW}{fit_column('held back', W_VER)}{Colors.ENDC}"
+                    )
                 out.append(
-                    f"{prefix} [{mark}] {Colors.CYAN}{truncate(update['id'], id_w):<{id_w}}{Colors.ENDC} "
-                    f"{Colors.YELLOW}{truncate(update['installed'], W_VER):<{W_VER}}{Colors.ENDC} "
+                    f"{prefix} [{mark}] {Colors.CYAN}{fit_column(update['id'], id_w)}{Colors.ENDC} "
+                    f"{Colors.YELLOW}{fit_column(update['installed'], W_VER)}{Colors.ENDC} "
                     f"{eligible_str} "
-                    f"{Colors.BLUE}{truncate(update['latest'], W_VER):<{W_VER}}{Colors.ENDC} "
-                    f"{truncate(update['latest_release_date'], W_DATE):<{W_DATE}} "
-                    f"{truncate(update['eligible_platform'] or update['latest_platform'], W_PLAT):<{W_PLAT}}"
+                    f"{Colors.BLUE}{fit_column(update['latest'], W_VER)}{Colors.ENDC} "
+                    f"{fit_column(update['latest_release_date'], W_DATE)} "
+                    f"{fit_column(update['eligible_platform'] or update['latest_platform'], W_PLAT)}"
                 )
 
             status = (
@@ -1491,7 +1780,7 @@ def handle_update(args, config):
     print(f"{Colors.BLUE}Fetching installed VS Code extensions...{Colors.ENDC}")
     installed_exts = get_installed_extensions(code_binary)
     if not installed_exts:
-        print("No extensions found.")
+        print("No extensions found installed.")
         return
 
     print(f"Found {len(installed_exts)} extensions installed.")
@@ -1605,11 +1894,10 @@ def select_removals(installed_exts):
     top = 0
 
     W_VER = 15
-    OVERHEAD = 6 + 1 + W_VER + 1  # 6 prefix + 1 gap + 15 version + 1 safety buffer
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+    OVERHEAD = 6 + 1 + W_VER + 1
 
     def visual_len(s):
-        return len(ansi_escape.sub("", s))
+        return display_width(s)
 
     first_frame = True
     prev_lines = 0
@@ -1636,7 +1924,7 @@ def select_removals(installed_exts):
                 f"{Colors.RED}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=uninstall  Esc/Ctrl+C=cancel{Colors.ENDC}"
             )
             out.append(
-                f"{Colors.BOLD}{'':6}{'Extension ID':<{id_w}} {'Version':<{W_VER}}{Colors.ENDC}"
+                f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Version', W_VER)}{Colors.ENDC}"
             )
             out.append("-" * min(cols, row_width))
 
@@ -1645,8 +1933,8 @@ def select_removals(installed_exts):
                 prefix = ">" if i == cursor_idx else " "
                 mark = f"{Colors.RED}x{Colors.ENDC}" if selected[i] else " "
                 out.append(
-                    f"{prefix} [{mark}] {Colors.CYAN}{truncate(ext_id, id_w):<{id_w}}{Colors.ENDC} "
-                    f"{Colors.YELLOW}{truncate(ver, W_VER):<{W_VER}}{Colors.ENDC}"
+                    f"{prefix} [{mark}] {Colors.CYAN}{fit_column(ext_id, id_w)}{Colors.ENDC} "
+                    f"{Colors.YELLOW}{fit_column(ver, W_VER)}{Colors.ENDC}"
                 )
 
             status = (
@@ -1814,14 +2102,14 @@ def handle_list(args, config):
             return
 
         print(
-            f"{Colors.BOLD}{'Extension ID':<45} {'Installed':<15} {'Latest':<15}{Colors.ENDC}"
+            f"{Colors.BOLD}{fit_column('Extension ID', 45)} {fit_column('Installed', 15)} {fit_column('Latest', 15)}{Colors.ENDC}"
         )
         print("-" * 77)
         for ext_id, installed_ver in ext_items:
             up_info = update_ids[ext_id]
             latest_str = up_info["latest"]
             print(
-                f"{Colors.CYAN}{ext_id:<45}{Colors.ENDC} {Colors.YELLOW}{installed_ver:<15}{Colors.ENDC} {Colors.GREEN}{latest_str:<15}{Colors.ENDC}"
+                f"{Colors.CYAN}{fit_column(ext_id, 45)}{Colors.ENDC} {Colors.YELLOW}{fit_column(installed_ver, 15)}{Colors.ENDC} {Colors.GREEN}{fit_column(latest_str, 15)}{Colors.ENDC}"
             )
         return
 
@@ -1830,13 +2118,310 @@ def handle_list(args, config):
             print(ext_id)
         return
 
-    print(f"{Colors.BOLD}{'Extension ID':<45} {'Version':<15}{Colors.ENDC}")
+    print(
+        f"{Colors.BOLD}{fit_column('Extension ID', 45)} {fit_column('Version', 15)}{Colors.ENDC}"
+    )
     print("-" * 62)
     for ext_id, ver in ext_items:
         print(
-            f"{Colors.CYAN}{ext_id:<45}{Colors.ENDC} {Colors.YELLOW}{ver:<15}{Colors.ENDC}"
+            f"{Colors.CYAN}{fit_column(ext_id, 45)}{Colors.ENDC} {Colors.YELLOW}{fit_column(ver, 15)}{Colors.ENDC}"
         )
     print(f"\nTotal: {len(ext_items)} extension(s)")
+
+
+def select_search_results(search_results):
+    if not HAS_TTY or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return []
+
+    n = len(search_results)
+    if n == 0:
+        return []
+
+    selected = [False] * n
+    cursor_idx = 0
+    top = 0
+
+    W_VER = 12
+    W_NAME = 25
+    OVERHEAD = 6 + 1 + (W_NAME + 1) + (W_VER + 1) + 1
+
+    def visual_len(s):
+        return display_width(s)
+
+    first_frame = True
+    prev_lines = 0
+
+    sys.stdout.write("\033[?25l")
+    sys.stdout.flush()
+
+    try:
+        while True:
+            cols, rows = shutil.get_terminal_size((80, 24))
+            id_w = max(15, (cols - OVERHEAD) // 2)
+            desc_w = max(10, cols - OVERHEAD - id_w)
+            row_width = OVERHEAD + id_w + desc_w
+            lines_per_row = max(1, -(-row_width // cols))
+            win = max(1, min(n, (rows - 5) // lines_per_row))
+
+            if cursor_idx < top:
+                top = cursor_idx
+            elif cursor_idx >= top + win:
+                top = cursor_idx - win + 1
+            top = max(0, min(top, max(0, n - win)))
+
+            out = []
+            out.append(
+                f"{Colors.GREEN}{Colors.BOLD}Space=toggle  a=toggle all  ↑/↓=move  Enter=install  Esc/Ctrl+C=cancel{Colors.ENDC}"
+            )
+            out.append(
+                f"{Colors.BOLD}{'':6}{fit_column('Extension ID', id_w)} {fit_column('Display Name', W_NAME)} "
+                f"{fit_column('Eligible', W_VER)} {fit_column('Description', desc_w)}{Colors.ENDC}"
+            )
+            out.append("-" * min(cols, row_width))
+
+            for i in range(top, top + win):
+                res = search_results[i]
+                prefix = ">" if i == cursor_idx else " "
+                mark = f"{Colors.GREEN}x{Colors.ENDC}" if selected[i] else " "
+                ver_color = Colors.YELLOW if res["is_held_back"] else Colors.GREEN
+                out.append(
+                    f"{prefix} [{mark}] {Colors.CYAN}{fit_column(res['id'], id_w)}{Colors.ENDC} "
+                    f"{Colors.BOLD}{fit_column(res['displayName'], W_NAME)}{Colors.ENDC} "
+                    f"{ver_color}{fit_column(res['eligible'], W_VER)}{Colors.ENDC} "
+                    f"{fit_column(res['description'], desc_w)}"
+                )
+
+            status = (
+                f"[{top + 1}-{top + win}/{n}]  (scroll with ↑/↓)"
+                if win < n
+                else f"[{n} result{'s' if n != 1 else ''}]"
+            )
+            out.append(f"{Colors.BOLD}{status}{Colors.ENDC}")
+
+            if not first_frame:
+                if prev_lines > 1:
+                    sys.stdout.write(f"\r\033[{prev_lines - 1}A")
+                else:
+                    sys.stdout.write("\r")
+                sys.stdout.write("\033[J")
+            else:
+                first_frame = False
+
+            total_lines = sum(max(1, -(-visual_len(line) // cols)) for line in out)
+            prev_lines = total_lines
+
+            sys.stdout.write("\n".join(out))
+            sys.stdout.flush()
+
+            key = get_key()
+            if key in ("ctrl+c", "esc"):
+                raise KeyboardInterrupt
+            elif key == "up":
+                cursor_idx = (cursor_idx - 1) % n
+            elif key == "down":
+                cursor_idx = (cursor_idx + 1) % n
+            elif key == "space":
+                selected[cursor_idx] = not selected[cursor_idx]
+            elif key in ("a", "A"):
+                selected = [False] * n if any(selected) else [True] * n
+            elif key == "enter":
+                break
+
+        sys.stdout.write("\n\033[?25h")
+        sys.stdout.flush()
+
+        return [search_results[i]["id"] for i in range(n) if selected[i]]
+
+    except KeyboardInterrupt:
+        sys.stdout.write("\n\033[?25h")
+        sys.stdout.flush()
+        print("Selection cancelled.")
+        sys.exit(0)
+
+
+def handle_search(args, config):
+    code_binary = parse_code_binary(
+        resolve_option(args.code_binary, config, "code_binary", "code")
+    )
+    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
+    service_url = (
+        OPEN_VSX_SERVICE_URL
+        if open_vsx
+        else resolve_option(
+            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
+        ).rstrip("/")
+    )
+
+    include_prerelease = resolve_option(
+        args.include_prerelease, config, "include_prerelease", False
+    )
+    no_code_version_check = resolve_option(
+        args.no_code_version_check, config, "no_code_version_check", False
+    )
+    min_release_age_str = resolve_option(
+        args.min_release_age, config, "min_release_age", "24h"
+    )
+    try:
+        min_release_age = parse_age_threshold(min_release_age_str)
+    except ValueError as e:
+        print(f"{Colors.RED}Error: {e}{Colors.ENDC}", file=sys.stderr)
+        sys.exit(1)
+
+    vscode_version = None if no_code_version_check else get_vscode_version(code_binary)
+    target_platform = get_local_target_platform()
+    extensions_config = config.get("extensions", {})
+
+    if not args.quiet:
+        print(
+            f"{Colors.BLUE}Searching extension gallery for '{args.query}'...{Colors.ENDC}"
+        )
+    results = query_marketplace_search(
+        args.query,
+        max_results=args.max_results,
+        target_platform=target_platform,
+        vscode_version=vscode_version,
+        include_prerelease=include_prerelease,
+        min_release_age=min_release_age,
+        extensions_config=extensions_config,
+        service_url=service_url,
+    )
+
+    if not results:
+        print(f"No extensions found matching '{args.query}'.")
+        return
+
+    if args.quiet:
+        for r in results:
+            print(r["id"])
+        return
+
+    W_ID = 35
+    W_NAME = 25
+    W_VER = 12
+    cols, _ = shutil.get_terminal_size((100, 24))
+    W_DESC = max(10, cols - W_ID - W_NAME - W_VER - 4)
+
+    print(
+        f"\n{Colors.BOLD}{fit_column('Extension ID', W_ID)} {fit_column('Display Name', W_NAME)} {fit_column('Eligible', W_VER)} {fit_column('Description', W_DESC)}{Colors.ENDC}"
+    )
+    print("-" * min(cols, W_ID + W_NAME + W_VER + W_DESC + 4))
+
+    for r in results:
+        ver_color = Colors.YELLOW if r["is_held_back"] else Colors.GREEN
+        print(
+            f"{Colors.CYAN}{fit_column(r['id'], W_ID)}{Colors.ENDC} "
+            f"{Colors.BOLD}{fit_column(r['displayName'], W_NAME)}{Colors.ENDC} "
+            f"{ver_color}{fit_column(r['eligible'], W_VER)}{Colors.ENDC} "
+            f"{fit_column(r['description'], W_DESC)}"
+        )
+
+    print(f"\nFound {len(results)} matching extension(s).")
+
+    if args.interactive or (HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty()):
+        print()
+        if prompt_yes_no(
+            "Would you like to select extensions to install from these search results?",
+            default=False,
+        ):
+            selected_ids = select_search_results(results)
+            if selected_ids:
+                args.extensions = selected_ids
+                args.include_prerelease = getattr(args, "include_prerelease", False)
+                args.no_code_version_check = getattr(
+                    args, "no_code_version_check", False
+                )
+                args.download_dir = getattr(args, "download_dir", None)
+                args.yes = True
+                args.min_release_age = getattr(args, "min_release_age", None)
+                handle_install(args, config)
+
+
+def handle_info(args, config):
+    open_vsx = resolve_option(args.open_vsx, config, "open_vsx", False)
+    service_url = (
+        OPEN_VSX_SERVICE_URL
+        if open_vsx
+        else resolve_option(
+            args.service_url, config, "service_url", DEFAULT_SERVICE_URL
+        ).rstrip("/")
+    )
+    code_binary = parse_code_binary(
+        resolve_option(args.code_binary, config, "code_binary", "code")
+    )
+
+    ext_id = args.extension.strip().lower()
+    if "@" in ext_id:
+        ext_id = ext_id.split("@")[0]
+
+    if "." not in ext_id:
+        print(
+            f"{Colors.RED}Error: Invalid extension ID '{args.extension}'. Expected format 'publisher.name'.{Colors.ENDC}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"{Colors.BLUE}Fetching extension metadata for '{ext_id}'...{Colors.ENDC}")
+    marketplace_data = query_marketplace_extensions([ext_id], service_url=service_url)
+    ext_obj = marketplace_data.get(ext_id)
+
+    if not ext_obj:
+        print(
+            f"{Colors.RED}✗ Extension '{ext_id}' not found on extension gallery.{Colors.ENDC}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    pub_name = ext_obj.get("publisher", {}).get("publisherName", "")
+    pub_disp = ext_obj.get("publisher", {}).get("displayName") or pub_name
+    ext_name = ext_obj.get("extensionName", "")
+    full_id = f"{pub_name}.{ext_name}".lower()
+    display_name = ext_obj.get("displayName") or ext_name
+    description = ext_obj.get("shortDescription") or "No description provided."
+
+    versions = ext_obj.get("versions", [])
+    latest_ver = versions[0].get("version", "unknown") if versions else "unknown"
+    last_updated = versions[0].get("lastUpdated", "") if versions else ""
+    release_date = last_updated[:10] if len(last_updated) >= 10 else last_updated
+
+    categories = ext_obj.get("categories", [])
+    cat_str = ", ".join(categories) if categories else "None"
+
+    installed_exts = get_installed_extensions(code_binary)
+    installed_ver = installed_exts.get(full_id)
+    installed_status = (
+        f"{Colors.GREEN}Installed (v{installed_ver}){Colors.ENDC}"
+        if installed_ver
+        else f"{Colors.YELLOW}Not installed{Colors.ENDC}"
+    )
+
+    props = versions[0].get("properties", []) if versions else []
+    repo_url = None
+    homepage_url = None
+    pricing = "Free"
+    for p in props:
+        k, v = p.get("key"), p.get("value")
+        if k == "Microsoft.VisualStudio.Services.Links.Source":
+            repo_url = v
+        elif k == "Microsoft.VisualStudio.Services.Links.Getstarted":
+            homepage_url = v
+        elif k == "Microsoft.VisualStudio.Services.Content.Pricing":
+            pricing = v
+
+    print(
+        f"\n{Colors.BOLD}{Colors.CYAN}{display_name}{Colors.ENDC} ({Colors.BOLD}{full_id}{Colors.ENDC})"
+    )
+    print("=" * (len(display_name) + len(full_id) + 5))
+    print(f"  {Colors.BOLD}Publisher:{Colors.ENDC}   {pub_disp} ({pub_name})")
+    print(f"  {Colors.BOLD}Latest Ver:{Colors.ENDC}  v{latest_ver} ({release_date})")
+    print(f"  {Colors.BOLD}Status:{Colors.ENDC}      {installed_status}")
+    print(f"  {Colors.BOLD}Pricing:{Colors.ENDC}     {pricing}")
+    print(f"  {Colors.BOLD}Categories:{Colors.ENDC}  {cat_str}")
+    if repo_url:
+        print(f"  {Colors.BOLD}Repository:{Colors.ENDC}  {repo_url}")
+    if homepage_url and homepage_url != repo_url:
+        print(f"  {Colors.BOLD}Homepage:{Colors.ENDC}    {homepage_url}")
+    print(f"\n  {Colors.BOLD}Description:{Colors.ENDC}")
+    print(f"    {description}\n")
 
 
 def main():
@@ -1865,7 +2450,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="code-extensions",
-        description="VS Code Extension Manager: Install, update, list, and remove extensions with security controls.",
+        description="VS Code Extension Manager: Install, update, list, search, and remove extensions with security controls.",
     )
     subparsers = parser.add_subparsers(
         dest="command", required=True, help="Subcommand to execute"
@@ -1879,8 +2464,15 @@ def main():
     )
     parser_install.add_argument(
         "extensions",
-        nargs="+",
+        nargs="*",
+        default=[],
         help="Extension ID(s) to install (e.g. ms-python.python or ms-python.python@2024.1.0)",
+    )
+    parser_install.add_argument(
+        "-f",
+        "--file",
+        default=None,
+        help="File containing extension IDs to install (one per line)",
     )
     parser_install.add_argument(
         "-p",
@@ -2003,6 +2595,70 @@ def main():
         help="List only extensions that have updates available",
     )
 
+    # Search sub-parser
+    parser_search = subparsers.add_parser(
+        "search",
+        parents=[parent_parser],
+        help="Search VS Code Marketplace / Open VSX for extensions",
+    )
+    parser_search.add_argument(
+        "query",
+        help="Search query text (e.g. python, rust, gitlens)",
+    )
+    parser_search.add_argument(
+        "-n",
+        "--max-results",
+        type=int,
+        default=15,
+        help="Maximum number of search results to return (default: 15)",
+    )
+    parser_search.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Output raw extension IDs only (one per line, ideal for scripting)",
+    )
+    parser_search.add_argument(
+        "-i",
+        "--interactive",
+        action="store_true",
+        default=False,
+        help="Interactively select extensions to install from search results",
+    )
+    parser_search.add_argument(
+        "-p",
+        "--include-prerelease",
+        action="store_true",
+        default=None,
+        help="Allow pre-release versions",
+    )
+    parser_search.add_argument(
+        "--no-code-version-check",
+        dest="no_code_version_check",
+        action="store_true",
+        default=None,
+        help="Disable VS Code version compatibility check",
+    )
+    parser_search.add_argument(
+        "-a",
+        "--min-release-age",
+        default=None,
+        help="Minimum release age threshold (e.g. 24h, 3d, 0)",
+    )
+
+    # Info / Show sub-parser
+    parser_info = subparsers.add_parser(
+        "info",
+        aliases=["show"],
+        parents=[parent_parser],
+        help="Show detailed metadata for an extension",
+    )
+    parser_info.add_argument(
+        "extension",
+        help="Extension ID (e.g. ms-python.python)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "install":
@@ -2013,6 +2669,10 @@ def main():
         handle_remove(args, config)
     elif args.command == "list":
         handle_list(args, config)
+    elif args.command == "search":
+        handle_search(args, config)
+    elif args.command in ("info", "show"):
+        handle_info(args, config)
 
 
 if __name__ == "__main__":
