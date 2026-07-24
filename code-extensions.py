@@ -543,6 +543,7 @@ CONFIG_OPTION_TYPES = {
     "min_release_age": str,
     "service_url": str,
     "open_vsx": bool,
+    "open_vsx_token": str,
 }
 
 EXT_OPTION_KEYS = frozenset(
@@ -827,6 +828,11 @@ def handle_config(args, config):
             ),
             ("open_vsx", "Use Open VSX registry by default (true/false)", "false"),
             (
+                "open_vsx_token",
+                "Personal access token for Open VSX Registry authentication",
+                "none",
+            ),
+            (
                 "service_url",
                 "Custom Extension Gallery API endpoint URL",
                 "Marketplace API",
@@ -1005,11 +1011,55 @@ def vsix_filename(pub_name, ext_name, version, platform):
     return filename + ".vsix"
 
 
-def _post_extension_query(payload, service_url):
+def is_open_vsx_url(url):
+    if not url:
+        return False
+    url_lower = url.lower()
+    return (
+        "open-vsx.org" in url_lower
+        or url.rstrip("/").lower() == OPEN_VSX_SERVICE_URL.rstrip("/").lower()
+    )
+
+
+def resolve_open_vsx_token(args, config):
+    config = config or {}
+    token = resolve_option(
+        getattr(args, "open_vsx_token", None) if args else None,
+        config,
+        "open_vsx_token",
+        None,
+    )
+    if token:
+        return token
+    return os.environ.get("OVSX_PAT")
+
+
+def resolve_token_for_service(service_url, args=None, config=None):
+    config = config or {}
+    open_vsx = resolve_option(
+        getattr(args, "open_vsx", None) if args else None,
+        config,
+        "open_vsx",
+        False,
+    )
+    has_cli_token = (
+        hasattr(args, "open_vsx_token")
+        and getattr(args, "open_vsx_token", None) is not None
+    )
+    has_cfg_token = bool(config.get("open_vsx_token"))
+    if is_open_vsx_url(service_url) or open_vsx or has_cli_token or has_cfg_token:
+        return resolve_open_vsx_token(args, config)
+    return None
+
+
+def _post_extension_query(payload, service_url, token=None):
     """POST an extensionquery payload, with a 1h on-disk cache and retries.
 
     Returns the parsed JSON response, or None if the request ultimately failed.
     """
+    if not token and is_open_vsx_url(service_url):
+        token = os.environ.get("OVSX_PAT")
+
     req_data = json.dumps(payload).encode("utf-8")
     cache_key_data = {"service_url": service_url, "payload": payload}
     payload_hash = hashlib.sha256(
@@ -1029,13 +1079,17 @@ def _post_extension_query(payload, service_url):
     if "api-version=" not in query_endpoint:
         query_endpoint += "?api-version=7.2-preview.1"
 
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json; api-version=7.2-preview.1",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     req = urllib.request.Request(
         query_endpoint,
         data=req_data,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json; api-version=7.2-preview.1",
-        },
+        headers=headers,
         method="POST",
     )
 
@@ -1093,7 +1147,7 @@ def _post_extension_query(payload, service_url):
     return None
 
 
-def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
+def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL, token=None):
     cleanup_stale_cache()
     if not ext_ids:
         return {}
@@ -1121,7 +1175,7 @@ def query_marketplace_extensions(ext_ids, service_url=DEFAULT_SERVICE_URL):
             "flags": 17,
         }
 
-        resp_data = _post_extension_query(payload, service_url)
+        resp_data = _post_extension_query(payload, service_url, token=token)
         if not resp_data:
             continue
 
@@ -1148,6 +1202,7 @@ def query_marketplace_search(
     min_release_age=None,
     extensions_config=None,
     service_url=DEFAULT_SERVICE_URL,
+    token=None,
 ):
     cleanup_stale_cache()
     if not query_text:
@@ -1173,7 +1228,7 @@ def query_marketplace_search(
         "flags": 914,
     }
 
-    resp_data = _post_extension_query(payload, service_url)
+    resp_data = _post_extension_query(payload, service_url, token=token)
     if not resp_data:
         return []
 
@@ -1190,7 +1245,9 @@ def query_marketplace_search(
         for ext in extensions
         if ext.get("publisher", {}).get("publisherName") and ext.get("extensionName")
     ]
-    ext_details_map = query_marketplace_extensions(ext_ids, service_url=service_url)
+    ext_details_map = query_marketplace_extensions(
+        ext_ids, service_url=service_url, token=token
+    )
 
     search_results = []
     for ext in extensions:
@@ -1284,15 +1341,23 @@ def query_marketplace_search(
     return search_results
 
 
-def download_vsix(url, filepath):
+def download_vsix(url, filepath, token=None, service_url=None):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     show_progress = sys.stdout.isatty()
 
+    if not token:
+        if is_open_vsx_url(url) or (service_url and is_open_vsx_url(service_url)):
+            token = os.environ.get("OVSX_PAT")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
     req = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        },
+        headers=headers,
     )
 
     with urllib.request.urlopen(req, timeout=30) as response:
@@ -1471,6 +1536,7 @@ def handle_install(args, config):
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
     service_url = resolve_service_url(args, config)
+    token = resolve_token_for_service(service_url, args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -1545,7 +1611,9 @@ def handle_install(args, config):
 
     ext_ids = [t[0] for t in parsed_targets]
     print(f"{Colors.BLUE}Querying extension gallery for installation...{Colors.ENDC}")
-    marketplace_data = query_marketplace_extensions(ext_ids, service_url=service_url)
+    marketplace_data = query_marketplace_extensions(
+        ext_ids, service_url=service_url, token=token
+    )
     installed_exts = get_installed_extensions(code_binary)
 
     download_dir = resolve_option(args.download_dir, config, "download_dir", None)
@@ -1709,7 +1777,7 @@ def handle_install(args, config):
             f"Downloading {Colors.CYAN}{full_id}{Colors.ENDC} v{Colors.GREEN}{target_version}{Colors.ENDC} ({target_plat})..."
         )
         try:
-            download_vsix(url, filepath)
+            download_vsix(url, filepath, token=token, service_url=service_url)
         except Exception as e:
             print(f"{Colors.RED}✗ Download failed: {e}{Colors.ENDC}", file=sys.stderr)
             continue
@@ -1753,6 +1821,7 @@ def check_updates(
     extensions_config=None,
     cli_min_release_age_override=False,
     service_url=DEFAULT_SERVICE_URL,
+    token=None,
 ):
     ext_ids = list(installed_exts.keys())
     if extensions_config:
@@ -1762,7 +1831,9 @@ def check_updates(
             if not extensions_config.get(eid.lower(), {}).get("ignore", False)
         ]
 
-    marketplace_data = query_marketplace_extensions(ext_ids, service_url=service_url)
+    marketplace_data = query_marketplace_extensions(
+        ext_ids, service_url=service_url, token=token
+    )
     updates = []
 
     for full_id, ext in marketplace_data.items():
@@ -2100,6 +2171,7 @@ def handle_update(args, config):
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
     service_url = resolve_service_url(args, config)
+    token = resolve_token_for_service(service_url, args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -2151,6 +2223,7 @@ def handle_update(args, config):
         extensions_config=extensions_config,
         cli_min_release_age_override=cli_min_release_age_override,
         service_url=service_url,
+        token=token,
     )
 
     print()
@@ -2203,7 +2276,7 @@ def handle_update(args, config):
             f"Downloading {Colors.CYAN}{update['id']}{Colors.ENDC} v{Colors.GREEN}{version}{Colors.ENDC} ({platform})..."
         )
         try:
-            download_vsix(url, filepath)
+            download_vsix(url, filepath, token=token, service_url=service_url)
         except Exception as e:
             print(f"{Colors.RED}✗ Download failed: {e}{Colors.ENDC}", file=sys.stderr)
             continue
@@ -2427,6 +2500,7 @@ def handle_list(args, config):
 
     if args.outdated:
         service_url = resolve_service_url(args, config)
+        token = resolve_token_for_service(service_url, args, config)
         vscode_version = get_vscode_version(code_binary)
         target_platform = get_local_target_platform()
         min_release_age_str = resolve_option(None, config, "min_release_age", "24h")
@@ -2441,6 +2515,7 @@ def handle_list(args, config):
             min_release_age=min_release_age,
             extensions_config=config.get("extensions", {}),
             service_url=service_url,
+            token=token,
         )
         update_ids = {u["id"]: u for u in updates}
         ext_items = [item for item in ext_items if item[0] in update_ids]
@@ -2687,6 +2762,7 @@ def handle_search(args, config):
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
     service_url = resolve_service_url(args, config)
+    token = resolve_token_for_service(service_url, args, config)
 
     include_prerelease = resolve_option(
         args.include_prerelease, config, "include_prerelease", False
@@ -2720,6 +2796,7 @@ def handle_search(args, config):
         min_release_age=min_release_age,
         extensions_config=extensions_config,
         service_url=service_url,
+        token=token,
     )
 
     if not results:
@@ -2766,6 +2843,7 @@ def handle_search(args, config):
 
 def handle_info(args, config):
     service_url = resolve_service_url(args, config)
+    token = resolve_token_for_service(service_url, args, config)
     code_binary = parse_code_binary(
         resolve_option(args.code_binary, config, "code_binary", "code")
     )
@@ -2779,7 +2857,7 @@ def handle_info(args, config):
             f"{Colors.BLUE}Searching extension gallery for '{ext_id}'...{Colors.ENDC}"
         )
         search_results = query_marketplace_search(
-            ext_id, max_results=5, service_url=service_url
+            ext_id, max_results=5, service_url=service_url, token=token
         )
         if not search_results:
             print(
@@ -2794,7 +2872,9 @@ def handle_info(args, config):
         ext_id = best_match
 
     print(f"{Colors.BLUE}Fetching extension metadata for '{ext_id}'...{Colors.ENDC}")
-    marketplace_data = query_marketplace_extensions([ext_id], service_url=service_url)
+    marketplace_data = query_marketplace_extensions(
+        [ext_id], service_url=service_url, token=token
+    )
     ext_obj = marketplace_data.get(ext_id)
 
     if not ext_obj:
@@ -3279,6 +3359,11 @@ def main():
         action="store_true",
         default=None,
         help="Use Open VSX Registry (https://open-vsx.org/vscode/gallery)",
+    )
+    parent_parser.add_argument(
+        "--open-vsx-token",
+        default=None,
+        help="Access token for Open VSX Registry",
     )
 
     parser = argparse.ArgumentParser(
