@@ -2544,9 +2544,14 @@ def interactive_search_flow(search_results, config, args, installed_exts=None):
         first_frame = True
         prev_lines = 0
 
+        max_id_len = max(
+            (display_width(res["id"]) for res in search_results), default=35
+        )
+
         while True:
             cols, rows = shutil.get_terminal_size((80, 24))
-            id_w = max(15, (cols - OVERHEAD) // 2)
+            avail = max(20, cols - OVERHEAD)
+            id_w = max(12, min(max_id_len, max(35, avail // 3)))
             desc_w = max(10, cols - OVERHEAD - id_w)
             row_width = OVERHEAD + id_w + desc_w
             lines_per_row = max(1, -(-row_width // cols))
@@ -2710,10 +2715,12 @@ def handle_search(args, config):
             print(r["id"])
         return
 
-    W_ID = 35
+    max_id_len = max((display_width(r["id"]) for r in results), default=35)
     W_NAME = 25
     W_VER = 12
     cols, _ = shutil.get_terminal_size((100, 24))
+    avail = max(20, cols - 4 - W_NAME - W_VER)
+    W_ID = max(12, min(max_id_len, max(35, avail // 3)))
     W_DESC = max(10, cols - W_ID - W_NAME - W_VER - 4)
 
     print(
