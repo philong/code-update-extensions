@@ -197,13 +197,15 @@ def run_code_cmd(args, retries=3, delay=1.0):
             raise e
 
 
-def get_installed_extensions(code_binary="code"):
+def get_installed_extensions(code_binary="code", ignore_errors=False):
     binary_cmd = parse_code_binary(code_binary)
     full_cmd = binary_cmd + ["--list-extensions", "--show-versions"]
     try:
         result = run_code_cmd(full_cmd)
         output = result.stdout
     except Exception as e:
+        if ignore_errors:
+            return {}
         cmd_str = " ".join(full_cmd)
         print(
             f"{Colors.RED}Error running '{cmd_str}': {e}{Colors.ENDC}",
@@ -2510,13 +2512,19 @@ def install_search_items(ext_ids, config, args):
     handle_install(args, config)
 
 
-def interactive_search_flow(search_results, config, args):
+def interactive_search_flow(search_results, config, args, installed_exts=None):
     if not HAS_TTY or not sys.stdin.isatty() or not sys.stdout.isatty():
         return
 
     n = len(search_results)
     if n == 0:
         return
+
+    if installed_exts is None:
+        code_binary = parse_code_binary(
+            resolve_option(args.code_binary, config, "code_binary", "code")
+        )
+        installed_exts = get_installed_extensions(code_binary, ignore_errors=True)
 
     selected = [False] * n
     cursor_idx = 0
@@ -2574,8 +2582,10 @@ def interactive_search_flow(search_results, config, args):
                 prefix = ">" if i == cursor_idx else " "
                 mark = f"{Colors.GREEN}x{Colors.ENDC}" if selected[i] else " "
                 ver_color = Colors.YELLOW if res["is_held_back"] else Colors.GREEN
+                is_installed = res["id"].lower() in installed_exts
+                id_color = Colors.GREEN if is_installed else Colors.CYAN
                 out.append(
-                    f"{prefix} [{mark}] {Colors.CYAN}{fit_column(res['id'], id_w)}{Colors.ENDC} "
+                    f"{prefix} [{mark}] {id_color}{fit_column(res['id'], id_w)}{Colors.ENDC} "
                     f"{Colors.BOLD}{fit_column(res['displayName'], W_NAME)}{Colors.ENDC} "
                     f"{ver_color}{fit_column(res['eligible'], W_VER)}{Colors.ENDC} "
                     f"{fit_column(res['description'], desc_w)}"
@@ -2689,8 +2699,10 @@ def handle_search(args, config):
         print(f"No extensions found matching '{args.query}'.")
         return
 
+    installed_exts = get_installed_extensions(code_binary, ignore_errors=True)
+
     if HAS_TTY and sys.stdin.isatty() and sys.stdout.isatty() and not args.quiet:
-        interactive_search_flow(results, config, args)
+        interactive_search_flow(results, config, args, installed_exts=installed_exts)
         return
 
     if args.quiet:
@@ -2711,8 +2723,10 @@ def handle_search(args, config):
 
     for r in results:
         ver_color = Colors.YELLOW if r["is_held_back"] else Colors.GREEN
+        is_installed = r["id"].lower() in installed_exts
+        id_color = Colors.GREEN if is_installed else Colors.CYAN
         print(
-            f"{Colors.CYAN}{fit_column(r['id'], W_ID)}{Colors.ENDC} "
+            f"{id_color}{fit_column(r['id'], W_ID)}{Colors.ENDC} "
             f"{Colors.BOLD}{fit_column(r['displayName'], W_NAME)}{Colors.ENDC} "
             f"{ver_color}{fit_column(r['eligible'], W_VER)}{Colors.ENDC} "
             f"{fit_column(r['description'], W_DESC)}"
