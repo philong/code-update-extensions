@@ -2963,15 +2963,10 @@ complete -c code-extensions -f
 
 complete -c code-extensions -n "__fish_use_subcommand" -a "install" -d "Install VS Code extension(s)"
 complete -c code-extensions -n "__fish_use_subcommand" -a "update" -d "Update installed extensions"
-complete -c code-extensions -n "__fish_use_subcommand" -a "upgrade" -d "Alias for update"
 complete -c code-extensions -n "__fish_use_subcommand" -a "remove" -d "Remove installed extension(s)"
-complete -c code-extensions -n "__fish_use_subcommand" -a "uninstall" -d "Alias for remove"
-complete -c code-extensions -n "__fish_use_subcommand" -a "rm" -d "Alias for remove"
 complete -c code-extensions -n "__fish_use_subcommand" -a "list" -d "List installed extensions"
-complete -c code-extensions -n "__fish_use_subcommand" -a "ls" -d "Alias for list"
 complete -c code-extensions -n "__fish_use_subcommand" -a "search" -d "Search extension gallery"
 complete -c code-extensions -n "__fish_use_subcommand" -a "info" -d "Show extension metadata"
-complete -c code-extensions -n "__fish_use_subcommand" -a "show" -d "Alias for info"
 complete -c code-extensions -n "__fish_use_subcommand" -a "clean" -d "Purge cache and temp VSIX files"
 complete -c code-extensions -n "__fish_use_subcommand" -a "config" -d "View or modify configuration"
 complete -c code-extensions -n "__fish_use_subcommand" -a "completion" -d "Generate shell completion script"
@@ -2981,7 +2976,7 @@ complete -c code-extensions -s s -l service-url -d "VS Code Extension Gallery se
 complete -c code-extensions -l open-vsx -d "Use Open VSX Registry"
 complete -c code-extensions -s h -l help -d "Show help message"
 
-complete -c code-extensions -n "__fish_seen_subcommand_from config" -a "list get set unset delete"
+complete -c code-extensions -n "__fish_seen_subcommand_from config" -a "list get set unset"
 complete -c code-extensions -n "__fish_seen_subcommand_from completion" -a "bash zsh fish powershell"
 
 complete -c code-extensions -n "__fish_seen_subcommand_from install" -s f -l file -d "File containing extension IDs" -r -F
@@ -3012,8 +3007,8 @@ _code_extensions_completion() {
         prev="${COMP_WORDS[COMP_CWORD-1]}"
     }
 
-    local commands="install update upgrade remove uninstall rm list ls search info show clean config completion"
-    local config_actions="list get set unset delete"
+    local commands="install update remove list search info clean config completion"
+    local config_actions="list get set unset"
     local shells="bash zsh fish powershell"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
@@ -3077,15 +3072,10 @@ _code_extensions() {
     commands=(
         'install:Install VS Code extension(s)'
         'update:Check and install updates'
-        'upgrade:Alias for update'
         'remove:Remove installed extension(s)'
-        'uninstall:Alias for remove'
-        'rm:Alias for remove'
         'list:List installed extensions'
-        'ls:Alias for list'
         'search:Search extension gallery'
         'info:Show detailed metadata for an extension'
-        'show:Alias for info'
         'clean:Purge API cache and temporary files'
         'config:View or modify configuration settings'
         'completion:Generate shell completion script'
@@ -3097,7 +3087,6 @@ _code_extensions() {
         'get:Get a configuration key value'
         'set:Set a configuration key value'
         'unset:Unset a configuration key'
-        'delete:Alias for unset'
     )
 
     local -a shells
@@ -3166,8 +3155,8 @@ Register-ArgumentCompleter -Native -CommandName 'code-extensions' -ScriptBlock {
     $commandElements = $commandAst.CommandElements
     $command = $commandElements[1].Value
 
-    $subcommands = @('install', 'update', 'upgrade', 'remove', 'uninstall', 'rm', 'list', 'ls', 'search', 'info', 'show', 'clean', 'config', 'completion')
-    $configActions = @('list', 'get', 'set', 'unset', 'delete')
+    $subcommands = @('install', 'update', 'remove', 'list', 'search', 'info', 'clean', 'config', 'completion')
+    $configActions = @('list', 'get', 'set', 'unset')
     $shells = @('bash', 'zsh', 'fish', 'powershell')
 
     if ($commandElements.Count -eq 2) {
